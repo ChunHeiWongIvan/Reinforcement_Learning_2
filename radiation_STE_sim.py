@@ -26,7 +26,7 @@ radiation_level = 100
 source = radiation.source(source_x, source_y, radiation_level)
 
 # Initialising agent parameters
-agent_x = 25
+agent_x = 10
 agent_y = 10
 agent_moveDist = 1
 agent = radiation.agent(agent_x, agent_y, search_area_x, search_area_y, agent_moveDist)
@@ -88,7 +88,7 @@ BATCH_SIZE = 128
 GAMMA = 0.99
 EPS_START = 1.0
 EPS_END = 0.00
-EPS_DECAY = 200
+EPS_DECAY = 500
 TAU = 0.005
 LR = 0.001
 
@@ -115,22 +115,22 @@ def select_action(state):
     else:
         return torch.tensor([[random.randint(0,3)]], device=device, dtype=torch.long) # 1-4 represents the index of action in action array
 
-episode_durations = []
+episode_end_distances = []
 
-def plot_durations(show_result=False):
+def plot_distance(show_result=False):
     plt.figure(1)
-    durations_t = torch.tensor(episode_durations, dtype=torch.float)
+    distances_t = torch.tensor(episode_end_distances, dtype=torch.float)
     if show_result:
         plt.title('Result')
     else:
         plt.clf()
         plt.title('Training...')
     plt.xlabel('Episode')
-    plt.ylabel('Duration')
-    plt.plot(durations_t.numpy())
+    plt.ylabel('Distance to source at the end of episode')
+    plt.plot(distances_t.numpy())
 
-    if len(durations_t) >= 100:
-        means = durations_t.unfold(0, 100, 1).mean(1).view(-1)
+    if len(distances_t) >= 100:
+        means = distances_t.unfold(0, 100, 1).mean(1).view(-1)
         means = torch.cat((torch.zeros(99), means))
         plt.plot(means.numpy())
 
@@ -166,11 +166,11 @@ def optimize_model():
     torch.nn.utils.clip_grad_value_(policy_net.parameters(), 100)
     optimizer.step()
 
-num_episodes = 200 if torch.cuda.is_available() or torch.backends.mps.is_available() else 100
+num_episodes = 500 if torch.cuda.is_available() or torch.backends.mps.is_available() else 100
 
 def one_hot_encode(state, n_observations):
     one_hot = torch.zeros(n_observations, dtype=torch.float32, device=device)
-    one_hot[state] = 1.0
+    one_hot[state] = 1
     return one_hot
 
 for i_episode in range(num_episodes):
@@ -184,25 +184,42 @@ for i_episode in range(num_episodes):
         actions[i]()
 
         observation = agent.state()
-        reward = 0
+        reward = -0.1
         # reward = 0.01 * source.radiation_level(agent.x(), agent.y())
 
-        if source.distance(agent.x(), agent.y()) <= 10: # Terminate episode if within 5 meters of source
+        if source.radiation_level(agent.x(), agent.y()) >= 4: # Terminate episode if within 5 meters of source
             terminated = True
             reward = 10
+            print(reward)
         else:
             terminated = False
 
-        if agent.count() >= 200:
+        if agent.count() >= 100:
             truncated = True
-            reward = -10
+            reward = 15 - math.sqrt(radiation_level / source.radiation_level(agent.x(), agent.y()))
+            print(reward)
         else:
             truncated = False
             # reward -= 0.001 * agent.count()
 
-        print(reward)
-
         reward = torch.tensor([reward], device=device)
+
+        if i_episode % 100 == 0: # Only show simulation of episodes that end with 00
+            plt.figure(2)
+            plt.clf()  # Clear the figure
+    
+            # Re-plot the radiation map and radiation source
+            plt.contourf(rad_X, rad_Y, Z_clipped, 200, cmap='viridis')
+            plt.colorbar()
+            plt.plot(source.x(), source.y(), 'ro', markersize=4)
+    
+            # Show agent as green point (current position only)
+            plt.plot(agent.x(), agent.y(), marker='x', color=(0.2, 0.8, 0), markersize=4)
+    
+            # Pause briefly to update the plot
+            plt.xlim(0, search_area_x)
+            plt.ylim(0, search_area_y)
+            plt.pause(0.00001)
 
         done = terminated or truncated
 
@@ -225,29 +242,12 @@ for i_episode in range(num_episodes):
         target_net.load_state_dict(target_net_state_dict)
 
         if done:
-            episode_durations.append(t + 1)
-            plot_durations()
+            episode_end_distances.append(source.distance(agent.x(), agent.y()))
+            plot_distance()
             break
-
-        if i_episode % 100 == 0: # Only show simulation of episodes that end with 00
-            plt.figure(2)
-            plt.clf()  # Clear the figure
-    
-            # Re-plot the radiation map and radiation source
-            plt.contourf(rad_X, rad_Y, Z_clipped, 200, cmap='viridis')
-            plt.colorbar()
-            plt.plot(source.x(), source.y(), 'ro', markersize=4)
-    
-            # Show agent as green point (current position only)
-            plt.plot(agent.x(), agent.y(), marker='x', color=(0.2, 0.8, 0), markersize=4)
-    
-            # Pause briefly to update the plot
-            plt.xlim(0, search_area_x)
-            plt.ylim(0, search_area_y)
-            plt.pause(0.00001)
 
 
 print('Complete')
-plot_durations(show_result=True)
+plot_distance(show_result=True)
 plt.ioff()
 plt.show()
