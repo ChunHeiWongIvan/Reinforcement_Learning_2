@@ -8,7 +8,8 @@ import math
 import matplotlib.pyplot as plt
 from collections import namedtuple, deque
 from itertools import count
-import radiation
+import radiation_discrete
+import particle_filter as pf
 
 # Turns on interactive mode for MATLAB plots, so that plot is showed without use of plt.show()
 plt.ion()
@@ -23,13 +24,14 @@ search_area_y = 50
 source_x = 25
 source_y = 40
 radiation_level = 100
-source = radiation.source(source_x, source_y, radiation_level)
+sd_noise = 0.01 # Sensor measurement noise
+source = radiation_discrete.source(source_x, source_y, radiation_level, sd_noise)
 
 # Initialising agent parameters
 agent_x = 10
 agent_y = 10
 agent_moveDist = 1
-agent = radiation.agent(agent_x, agent_y, search_area_x, search_area_y, agent_moveDist)
+agent = radiation_discrete.agent(agent_x, agent_y, search_area_x, search_area_y, agent_moveDist)
 agent_positions = [] # Save past agent positions
 
 # Create clipped array with mesh of radiation level
@@ -41,6 +43,16 @@ Z_clipped = np.clip(rad_Z, 0, 100)
 
 # Define the action set
 actions = [agent.moveUp, agent.moveDown, agent.moveLeft, agent.moveRight]
+
+# Initialise particle filter
+
+N = 1000 # Number of particles
+
+particles = pf.create_uniform_particles((0,search_area_x), (0,search_area_y), (radiation_level-50, radiation_level+150), N) # Initialise particles randomly in search area
+
+weights = np.ones(N) / N # All weights initalised equally
+
+print(weights)
 
 device = torch.device( # Checks whether CUDA/MPS device is available for acceleration, otherwise cpu is used.
     "cuda" if torch.cuda.is_available() else
@@ -88,7 +100,7 @@ BATCH_SIZE = 128
 GAMMA = 0.99
 EPS_START = 1.0
 EPS_END = 0.00
-EPS_DECAY = 500
+EPS_DECAY = 50
 TAU = 0.005
 LR = 0.001
 
@@ -166,7 +178,7 @@ def optimize_model():
     torch.nn.utils.clip_grad_value_(policy_net.parameters(), 100)
     optimizer.step()
 
-num_episodes = 500 if torch.cuda.is_available() or torch.backends.mps.is_available() else 100
+num_episodes = 150 if torch.cuda.is_available() or torch.backends.mps.is_available() else 50
 
 def one_hot_encode(state, n_observations):
     one_hot = torch.zeros(n_observations, dtype=torch.float32, device=device)
@@ -178,6 +190,10 @@ for i_episode in range(num_episodes):
     state = agent.state()
     state = one_hot_encode(state, n_observations).unsqueeze(0)
 
+    particles = pf.create_uniform_particles((0,search_area_x), (0,search_area_y), (radiation_level-50, radiation_level+150), N) # Initialise particles randomly in search area
+
+    weights = np.ones(N) / N # All weights initalised equally
+
     for t in count():
         action = select_action(state)
         i = int(action.item())
@@ -187,24 +203,33 @@ for i_episode in range(num_episodes):
         reward = -0.1
         # reward = 0.01 * source.radiation_level(agent.x(), agent.y())
 
+        # Update/ resample particles in PF
+        likelihood = pf.likelihood(agent.x(), agent.y(), particles, source.radiation_level(agent.x(), agent.y()), sd_noise) # Compute likelihood of each particle
+
+        weights = pf.update_weights(weights, likelihood) # Update weights according to likelihood
+
+        particles, weights = pf.resampling(particles, weights) # Resample if needed
+
+        est_mean, est_var = pf.estimate(particles, weights) # Fetch estimate of source location/ strength
+
         if source.radiation_level(agent.x(), agent.y()) >= 4: # Terminate episode if within 5 meters of source
             terminated = True
             reward = 10
-            print(reward)
+            print(f"Reward: {reward:.2f}")
         else:
             terminated = False
 
         if agent.count() >= 100:
             truncated = True
             reward = 15 - math.sqrt(radiation_level / source.radiation_level(agent.x(), agent.y()))
-            print(reward)
+            print(f"Reward: {reward:.2f}")
         else:
             truncated = False
             # reward -= 0.001 * agent.count()
 
         reward = torch.tensor([reward], device=device)
 
-        if i_episode % 100 == 0: # Only show simulation of episodes that end with 00
+        if i_episode % 50 == 0: # Only show simulation of episodes which are multiples of 50 (including 0).
             plt.figure(2)
             plt.clf()  # Clear the figure
     
@@ -215,6 +240,10 @@ for i_episode in range(num_episodes):
     
             # Show agent as green point (current position only)
             plt.plot(agent.x(), agent.y(), marker='x', color=(0.2, 0.8, 0), markersize=4)
+
+            # Show particles in particle filter
+            for particle in particles:    
+                plt.plot(particle[0], particle[1], marker='.', color=(1, 1, 1), markersize=1)
     
             # Pause briefly to update the plot
             plt.xlim(0, search_area_x)
@@ -225,6 +254,8 @@ for i_episode in range(num_episodes):
 
         if done:
             next_state = None
+            print(f"Estimated source x: {est_mean[0]:.2f}, Estimated source y: {est_mean[1]:.2f}, Estimated source strength: {est_mean[2]:.2f}")
+
         else:
             next_state = one_hot_encode(observation, n_observations).unsqueeze(0)
 
