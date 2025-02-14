@@ -40,6 +40,9 @@ class agent:
         # Initalises move counter to 0
         self.moveCount = 0
 
+        # Initialises actionPossible flag to True
+        self.actPossible = True
+
         # Updates initial agent state
         self.update_state()
 
@@ -59,24 +62,32 @@ class agent:
         if self.agent_y <= self.search_area_y - self.moveDist:
             self.agent_y += self.moveDist
             self.update_state()
-        self.moveCount += 1
+        else:
+            self.actPossible = False
+        self.moveCount += 1                   
 
     def moveDown(self):
         if self.agent_y >= 0 + self.moveDist:
             self.agent_y -= self.moveDist
             self.update_state()
+        else:
+            self.actPossible = False
         self.moveCount += 1
 
     def moveLeft(self):
         if self.agent_x >= 0 + self.moveDist:
             self.agent_x -= self.moveDist
             self.update_state()
+        else:
+            self.actPossible = False
         self.moveCount += 1
 
     def moveRight(self):
         if self.agent_x <= self.search_area_x - self.moveDist:
             self.agent_x += self.moveDist
             self.update_state()
+        else:
+            self.actPossible = False
         self.moveCount += 1
 
     def reset(self):
@@ -84,9 +95,13 @@ class agent:
         self.agent_y = self.init_y
         self.update_state()
         self.moveCount = 0
+        self.actPossible = True
         return self.agent_state
 
     def update_state(self):
         self.agent_state = self.agent_y * self.search_area_x + self.agent_x + 1
+
+    def actionPossible(self):
+        return self.actPossible
 
         

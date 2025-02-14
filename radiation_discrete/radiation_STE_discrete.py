@@ -14,11 +14,25 @@ import particle_filter as pf
 # Turns on interactive mode for MATLAB plots, so that plot is showed without use of plt.show()
 plt.ion()
 
+# Boolean variable to control if MATLAB plots are displayed throughout training process
+displayPlot = False
+
+device = torch.device( # Checks whether CUDA/MPS device is available for acceleration, otherwise cpu is used.
+    "cuda" if torch.cuda.is_available() else
+    "mps" if torch.backends.mps.is_available() else
+    "cpu"
+)
+
+print(f"Using {device} device")
+
+num_episodes = 200 if torch.cuda.is_available() or torch.backends.mps.is_available() else 100
+
 # Initialising environment
 
-# Initialise search area
+# Initialise search area/ possible source strength
 search_area_x = 50
 search_area_y = 50
+max_radiation_level = 500
 
 # Initalising source parameters
 source_x = 25
@@ -48,19 +62,18 @@ actions = [agent.moveUp, agent.moveDown, agent.moveLeft, agent.moveRight]
 
 N = 1000 # Number of particles
 
-particles = pf.create_uniform_particles((0,search_area_x), (0,search_area_y), (radiation_level-50, radiation_level+150), N) # Initialise particles randomly in search area
+particles = pf.create_uniform_particles((0, search_area_x), (0, search_area_y), (0, max_radiation_level), N) # Initialise particles randomly in search area
 
 weights = np.ones(N) / N # All weights initalised equally
 
-print(weights)
+source_term_estimates = torch.zeros(3, 150, dtype=torch.float32) # Initalise tensor to track the culmulative STE to compute moving average
+window_size = 25 # Moving average subset size
 
-device = torch.device( # Checks whether CUDA/MPS device is available for acceleration, otherwise cpu is used.
-    "cuda" if torch.cuda.is_available() else
-    "mps" if torch.backends.mps.is_available() else
-    "cpu"
-)
+# Initialise a deque to hold the last 'window_size' STE values
+moving_average_queue = deque(maxlen=window_size)
 
-print(f"Using {device} device")
+# Current (up to current episode) estimate of source parameters
+current_estimate = torch.tensor([search_area_x/2, search_area_y/2, max_radiation_level/2]) # Initalise with guess estimate (mean of min/max bounds)
 
 # Named tuple allows access to its elements using named fields. Unlike dictionaries, more memory efficient and the named fields are immutable.
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
@@ -96,7 +109,7 @@ class DQN(nn.Module):
         x = F.relu(self.layer2(x))
         return self.layer3(x)
 
-BATCH_SIZE = 128
+BATCH_SIZE = 32
 GAMMA = 0.99
 EPS_START = 1.0
 EPS_END = 0.00
@@ -141,9 +154,9 @@ def plot_distance(show_result=False):
     plt.ylabel('Distance to source at the end of episode')
     plt.plot(distances_t.numpy())
 
-    if len(distances_t) >= 100:
-        means = distances_t.unfold(0, 100, 1).mean(1).view(-1)
-        means = torch.cat((torch.zeros(99), means))
+    if len(distances_t) >= 50:
+        means = distances_t.unfold(0, 50, 1).mean(1).view(-1)
+        means = torch.cat((torch.zeros(49), means))
         plt.plot(means.numpy())
 
     plt.pause(0.001)
@@ -178,8 +191,6 @@ def optimize_model():
     torch.nn.utils.clip_grad_value_(policy_net.parameters(), 100)
     optimizer.step()
 
-num_episodes = 150 if torch.cuda.is_available() or torch.backends.mps.is_available() else 50
-
 def one_hot_encode(state, n_observations):
     one_hot = torch.zeros(n_observations, dtype=torch.float32, device=device)
     one_hot[state] = 1
@@ -190,38 +201,39 @@ for i_episode in range(num_episodes):
     state = agent.state()
     state = one_hot_encode(state, n_observations).unsqueeze(0)
 
-    particles = pf.create_uniform_particles((0,search_area_x), (0,search_area_y), (radiation_level-50, radiation_level+150), N) # Initialise particles randomly in search area
-
-    weights = np.ones(N) / N # All weights initalised equally
-
     for t in count():
         action = select_action(state)
         i = int(action.item())
         actions[i]()
 
         observation = agent.state()
-        reward = -0.1
+        reward = -0.25
         # reward = 0.01 * source.radiation_level(agent.x(), agent.y())
 
         # Update/ resample particles in PF
-        likelihood = pf.likelihood(agent.x(), agent.y(), particles, source.radiation_level(agent.x(), agent.y()), sd_noise) # Compute likelihood of each particle
+        likelihood = pf.likelihood(agent.x(), agent.y(), particles, source.radiation_level(agent.x(), agent.y()), 0.01) # Compute likelihood of each particle
 
         weights = pf.update_weights(weights, likelihood) # Update weights according to likelihood
 
         particles, weights = pf.resampling(particles, weights) # Resample if needed
 
-        est_mean, est_var = pf.estimate(particles, weights) # Fetch estimate of source location/ strength
+        STE_mean, STE_var = pf.estimate(particles, weights) # Fetch tentative estimate of source location/ strength
 
-        if source.radiation_level(agent.x(), agent.y()) >= 4: # Terminate episode if within 5 meters of source
+
+        if source.radiation_level(agent.x(), agent.y()) >= 100/(5**2): # Terminate episode if agent thinks it is within 5 meters of source
             terminated = True
-            reward = 10
+            reward = 25
+            print(f"Reward: {reward:.2f}")
+        elif agent.actionPossible() == False:
+            terminated = True
+            reward = -25
             print(f"Reward: {reward:.2f}")
         else:
             terminated = False
 
         if agent.count() >= 100:
             truncated = True
-            reward = 15 - math.sqrt(radiation_level / source.radiation_level(agent.x(), agent.y()))
+            reward = 30 - math.sqrt(current_estimate[2] / source.radiation_level(agent.x(), agent.y()))
             print(f"Reward: {reward:.2f}")
         else:
             truncated = False
@@ -229,7 +241,7 @@ for i_episode in range(num_episodes):
 
         reward = torch.tensor([reward], device=device)
 
-        if i_episode % 50 == 0: # Only show simulation of episodes which are multiples of 50 (including 0).
+        if i_episode % 100 == 0 and displayPlot: # Only show simulation of episodes which are multiples of 50 (including 0).
             plt.figure(2)
             plt.clf()  # Clear the figure
     
@@ -254,7 +266,12 @@ for i_episode in range(num_episodes):
 
         if done:
             next_state = None
-            print(f"Estimated source x: {est_mean[0]:.2f}, Estimated source y: {est_mean[1]:.2f}, Estimated source strength: {est_mean[2]:.2f}")
+            moving_average_queue.append(STE_mean)
+
+            # Compute moving average with 'window_size' no. of values or all available values.
+            current_estimate = torch.mean(torch.stack(list(moving_average_queue)), dim=0)
+
+            print(f"Estimated source x: {current_estimate[0]:.2f}, Estimated source y: {current_estimate[1]:.2f}, Estimated source strength: {current_estimate[2]:.2f}")
 
         else:
             next_state = one_hot_encode(observation, n_observations).unsqueeze(0)
@@ -274,7 +291,8 @@ for i_episode in range(num_episodes):
 
         if done:
             episode_end_distances.append(source.distance(agent.x(), agent.y()))
-            plot_distance()
+            if displayPlot:
+                plot_distance()
             break
 
 

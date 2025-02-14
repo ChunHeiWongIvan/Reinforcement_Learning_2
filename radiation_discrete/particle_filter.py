@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 from numpy.random import uniform
 
 # 1. Initialise particles randomly in search region
@@ -48,11 +49,19 @@ def update_weights(weights_old, likelihood):
     return weights_new / np.sum(weights_new)
     
 def estimate(particles, weights):
+    # Convert particles and weights to torch tensors (if they aren't already)
+    particles = torch.tensor(particles, dtype=torch.float32)
+    weights = torch.tensor(weights, dtype=torch.float32)
 
-    # Returns mean and variance of weighted particles 
+    # Returns mean and variance of weighted particles
     pos = particles[:, 0:3]
-    mean = np.average(pos, weights=weights, axis=0)
-    var  = np.average((pos - mean)**2, weights=weights, axis=0)
+    
+    # Calculate the weighted mean
+    mean = torch.sum(pos * weights.unsqueeze(1), dim=0) / torch.sum(weights)
+    
+    # Calculate the weighted variance
+    var = torch.sum(((pos - mean)**2) * weights.unsqueeze(1), dim=0) / torch.sum(weights)
+    
     return mean, var
 
 def resampling(particles, weights):
@@ -68,7 +77,9 @@ def resampling(particles, weights):
         indexes = np.searchsorted(cumulative_sum, np.random.random(N))
 
         # resample according to indexes
-        particles_new = particles[indexes]
+        sd_noise = np.array([0.1, 0.1, 0.5])  # Different standard deviations for each dimension
+        particles_new = particles[indexes] + np.random.normal(loc=0, scale=sd_noise, size=particles[indexes].shape)
+
         weights_new = np.ones(N) / N
 
         return particles_new, weights_new
