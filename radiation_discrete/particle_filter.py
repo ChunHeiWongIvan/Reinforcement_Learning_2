@@ -73,7 +73,7 @@ def resampling(particles, weights):
 
     if ess < 0.5*N:
         cumulative_sum = np.cumsum(weights)
-        cumulative_sum[-1] = 1. # avoid round-off error
+        cumulative_sum[-1] = 1. # avoid round-off error by setting last element of cumulative_sum array to 1.0
         indexes = np.searchsorted(cumulative_sum, np.random.random(N))
 
         # resample according to indexes
@@ -85,3 +85,12 @@ def resampling(particles, weights):
         return particles_new, weights_new
     
     return particles, weights
+
+def weighted_particle_sample(particles, weights):
+
+    cumulative_sum = np.cumsum(weights) # Computes cumulative distribution of weights
+    cumulative_sum[-1] = 1. # avoid round-off error by setting last element of cumulative_sum array to 1.0
+
+    index = np.searchsorted(cumulative_sum, np.random.random()) # Finds index of first particle whose CDF value >= random number from 0 to 1
+
+    return particles[index]

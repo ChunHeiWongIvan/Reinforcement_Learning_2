@@ -15,7 +15,7 @@ import particle_filter as pf
 plt.ion()
 
 # Boolean variable to control if MATLAB plots are displayed throughout training process
-displayPlot = False
+displayPlot = True
 
 device = torch.device( # Checks whether CUDA/MPS device is available for acceleration, otherwise cpu is used.
     "cuda" if torch.cuda.is_available() else
@@ -115,7 +115,7 @@ EPS_START = 1.0
 EPS_END = 0.00
 EPS_DECAY = 50
 TAU = 0.005
-LR = 0.001
+LR = 0.002 # was 0.001
 
 n_actions = len(actions)
 n_observations = (search_area_x + 1) * (search_area_y + 1)
@@ -138,7 +138,29 @@ def select_action(state):
         with torch.no_grad():
             return policy_net(state).max(1).indices.view(1, 1)  # Changed from (1, 16) to (1, 1)
     else:
-        return torch.tensor([[random.randint(0,3)]], device=device, dtype=torch.long) # 1-4 represents the index of action in action array
+        # Implementation of goal-based exploration (exploratory goal method)
+
+        particle = pf.weighted_particle_sample(particles, weights) # Sample weighted random particle to use as goal
+        distances = np.zeros(4)
+
+        # Find action that reduces distance between agent and goal the most
+
+        agent_pos_array = np.array([agent.x(), agent.y()]) # Gets agent position as array
+        particle_pos_array = np.array([particle[0], particle[1]]) # Gets particle position as array
+
+        # Compute distance after moveUp
+        distances[0] = np.linalg.norm(agent_pos_array + np.array([0.0, 1.0]) - particle_pos_array) # adding (0,1) corresponds to moving up
+        # Compute distance after moveDown
+        distances[1] = np.linalg.norm(agent_pos_array + np.array([0.0, -1.0]) - particle_pos_array) # adding (0,-1) corresponds to moving down
+        # Compute distance after moveLeft
+        distances[2] = np.linalg.norm(agent_pos_array + np.array([-1.0, 0.0]) - particle_pos_array) # adding (-1,0) corresponds to moving left
+        # Compute distance after moveRight
+        distances[3] = np.linalg.norm(agent_pos_array + np.array([1.0, 0.0]) - particle_pos_array) # adding (1,0) corresponds to moving right
+
+        return torch.tensor([[np.argmin(distances)]]).to(device)
+    
+        # return torch.tensor([[random.randint(0,3)]], device=device, dtype=torch.long) for selecting random action
+
 
 episode_end_distances = []
 
@@ -220,7 +242,9 @@ for i_episode in range(num_episodes):
         STE_mean, STE_var = pf.estimate(particles, weights) # Fetch tentative estimate of source location/ strength
 
 
-        if source.radiation_level(agent.x(), agent.y()) >= 100/(5**2): # Terminate episode if agent thinks it is within 5 meters of source
+# Possible: Terminate on both the convergence of source estimation/ close to source navigation
+
+        if source.radiation_level(agent.x(), agent.y()) >= radiation_level/(5**2): # Terminate episode if agent thinks it is within 5 meters of source
             terminated = True
             reward = 25
             print(f"Reward: {reward:.2f}")
