@@ -3,11 +3,11 @@ import numpy as np
 class source:
 
     # Initialises source location and strength
-    def __init__(self, source_x, source_y, source_radioactivity, sd_noise):
+    def __init__(self, source_x, source_y, source_radioactivity, sd_noise_pct):
         self.source_x = source_x
         self.source_y = source_y
         self.source_radioactivity = source_radioactivity
-        self.sd_noise = sd_noise
+        self.sd_noise_pct = sd_noise_pct
 
     def x(self):
         return self.source_x
@@ -19,8 +19,16 @@ class source:
         return np.sqrt((agent_x-self.source_x)**2 + (agent_y-self.source_y)**2)
     
     def radiation_level(self, agent_x, agent_y):
+        if self.distance(agent_x, agent_y) == 0:
+            true_radiation_level = self.source_radioactivity # Limit radioactivity at 0 distance (not theoretically possible) to radioactivity at 1 m
+        else:
+            true_radiation_level = self.source_radioactivity / self.distance(agent_x, agent_y)**2
+        return true_radiation_level + np.random.normal(loc=0, scale=self.sd_noise_pct*true_radiation_level) # Adds noise to measurement, 10% uncertainty
+    
+    def radiation_level_plot(self, agent_x, agent_y): # Special function just to plot colour gradient representing radiation levels
         true_radiation_level = self.source_radioactivity / self.distance(agent_x, agent_y)**2
-        return true_radiation_level + np.random.normal(loc=0, scale=self.sd_noise) # Adds noise to measurement
+        return true_radiation_level # No need to plot noise, colour gradient meant to represent true radiation levels
+    
     
 class agent:
 
@@ -103,5 +111,3 @@ class agent:
 
     def actionPossible(self):
         return self.actPossible
-
-        

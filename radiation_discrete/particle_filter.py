@@ -21,18 +21,21 @@ def create_gaussian_particles(mean, std, N):
 
 # 2. No need for predict step as the source is static (position and strength)
 
-def likelihood(agent_x, agent_y, particles, measured, sd_noise):
+def likelihood(agent_x, agent_y, particles, measured, sd_noise_pct):
     
     likelihood = np.empty(particles.shape[0])
 
     for i, particle in enumerate(particles):
 
-        # Compute radiation level at the sensor's position for given particle state
+        # Compute radiation level at the sensor's position for given particle state (model for radiation level vs. distance)
         dist = np.sqrt((agent_x-particle[0])**2 + (agent_y-particle[1])**2)
         radiation_level = particle[2] / dist**2
 
+        # Compute standard deviation of noise (scales with detected radiation level)
+        sigmaN = sd_noise_pct * radiation_level
+
         # Compute likelihood of source being at the particle with radiation level
-        likelihood[i] = (1/((sd_noise)*np.sqrt(2*np.pi)))*np.exp(-((measured-radiation_level)**2)/(2*(sd_noise)**2))
+        likelihood[i] = (1/((sigmaN)*np.sqrt(2*np.pi)))*np.exp(-((measured-radiation_level)**2)/(2*(sigmaN)**2))
 
     return likelihood
 
