@@ -1,3 +1,7 @@
+# Code sourced from official PyTorch Reinforcement Q-Learning (DQN) tutorial 
+# 
+# https://pytorch.org/tutorials/intermediate/reinforcement_q_learning.html
+
 import gym
 from gym import envs
 import torch
