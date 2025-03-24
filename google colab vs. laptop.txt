@@ -1,4 +1,0 @@
-**3k episodes, displaySimulation = False, displayPlot = True**
-
-google colab 54m 25s (the plots don't work on google colab
-laptop 59m 41s
