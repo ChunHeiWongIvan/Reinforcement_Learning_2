@@ -4,7 +4,6 @@
 
 import numpy as np
 import torch
-from numpy.random import uniform
 import random
 import math
 
@@ -183,16 +182,22 @@ def estimate(particles, weights):
 
 # Simple regularized resampling
 
-def resampling_simple(particles, weights, min_no_sources, max_no_sources, min_radiation_level, max_radiation_level):
+def resampling_simple(particles, weights, min_no_sources, max_no_sources, min_radiation_level, max_radiation_level, EPS_START, EPS_END, EPS_DECAY, steps_done):
 
     N = np.size(weights)
 
     # Compute ESS (Effective sample size) to determine how well the particles represent the distribution
     ess = 1 / np.sum(weights**2)
 
+    EPS_END = 0.10 # Custom minimum eps so particles always maintain some kind of diversity
+
+    eps_threshold = EPS_END + (EPS_START - EPS_END) * math.exp(-1. * steps_done / EPS_DECAY)
+
     need_resample = ess < 0.5*N # Check if resampling is needed using ESS
 
-    no_sources_change_pct = 0.01 # 1% chance for number of sources belief to be perturbed (equal chance for increase or decrease)
+    no_sources_change_pct = 0.004*eps_threshold # 0.4% probability for number of sources belief to increase, and to decrease (chance decays over time)
+
+    scramble_pct = 0.004*eps_threshold # 0.1% probability for sources location/ strength to be scrambled
 
     if need_resample:
         particles_new = particles # Initalise separate instance of particles array 
@@ -219,7 +224,7 @@ def resampling_simple(particles, weights, min_no_sources, max_no_sources, min_ra
 
             n_dim = no_sources*3 # Number of columns corresponds to number of sources multiplied by 3 (for x, y, strength)
 
-            perturbations = np.random.normal(0, 0.5, (len(particle_array), n_dim))
+            perturbations = np.random.normal(0, 0.5*eps_threshold, (len(particle_array), n_dim)) # Perturbations decay over time as estimate gets more confident
     
             grouped_particles[no_sources] = particle_array + perturbations
 
@@ -245,23 +250,72 @@ def resampling_simple(particles, weights, min_no_sources, max_no_sources, min_ra
             no_sources_change_prob = np.random.random() # Random variable from uniform distribution 0 to 1 for probability
             no_sources = int(particle[0])
                 
-            if no_sources_change_prob < no_sources_change_pct / 2 and no_sources < max_no_sources:  # Check if the particle should have its no. of sources belief increased
-
-                # Increase number of sources belief by 1
-
-                # Randomly initalise new particle
-       
+            if 0 < no_sources_change_prob < no_sources_change_pct and no_sources < max_no_sources: # Increase number of sources belief by 1
+                # Randomly initalise new source parameters
+                
                 particle[0] = no_sources + 1
                 particle[3 * no_sources + 1] = np.random.uniform(0, search_area_x)
                 particle[3 * no_sources + 2] = np.random.uniform(0, search_area_x)
                 particle[3 * no_sources + 3] = np.random.uniform(min_radiation_level, max_radiation_level)
                     
-            elif no_sources_change_pct / 2 < no_sources_change_prob < no_sources_change_pct and no_sources > min_no_sources:
-                # Reduce the number of sources belief by 1
-                particle[0] = no_sources - 1
-                particle[3*(no_sources - 1) + 1] = np.nan # Set extra source parameters to NaN
-                particle[3*(no_sources - 1) + 2] = np.nan
-                particle[3*(no_sources - 1) + 3] = np.nan
+            elif no_sources_change_pct < no_sources_change_prob < no_sources_change_pct*2 and no_sources > min_no_sources: # Reduce the number of sources belief by 1
+                # Removing source closest to strongest particle
+
+                # Extract number of sources (first element in the array)
+                no_sources = int(particle[0])
+
+                # Remove padding NaN values
+                particle_new = particle[:no_sources*3 + 1]
+
+                # Extract source positions and strengths
+                sources = particle_new[1:].reshape(no_sources, 3)  # 3 elements per source: (x, y, strength)
+
+                # Get the first source's (x1, y1, str1)
+                x1, y1, str1 = sources[0]
+
+                # Calculate the Euclidean distance between the first source and each of the other sources
+                distances = np.linalg.norm(sources[1:, :2] - np.array([x1, y1]), axis=1)  # Only use x and y for distance
+
+                # Find the index of the closest source
+                closest_index = np.argmin(distances) + 1  # Adding 1 to skip the first source
+
+                # Remove the closest source from the sources array
+                sources = np.delete(sources, closest_index, axis=0)
+
+                for i in range(6-no_sources):  
+                    sources = np.vstack([sources, [np.nan, np.nan, np.nan]])
+
+                # Update the particle with the remaining sources
+                particle[1:] = sources.flatten()  # Flatten the array to match the original format
+
+                particle[0] = no_sources - 1 # Subtract 1 from source count
+            
+            elif no_sources_change_pct*2 < no_sources_change_prob < no_sources_change_pct*2 + scramble_pct and no_sources > min_no_sources: # Can't scramble with 1 source :)
+                # Scramble order of strength values
+
+                # Extract number of sources (first element in the array)
+                no_sources = int(particle[0])
+
+                # Remove padding NaN values
+                particle_new = particle[:no_sources*3 + 1]
+
+                # Extract the 'str' values (assuming they are at every odd index)
+                str_values = particle_new[3::3]
+
+                # Ensure the shuffle is not identical to the original order
+                original_str_values = str_values.copy()  # Keep a copy of the original
+
+                # Shuffle and check if it's identical to the original
+                for i in range(10): # Shuffle 10 times until it is different from original, otherwise give up
+                    np.random.shuffle(str_values)
+                    if not np.array_equal(str_values, original_str_values):  # If shuffled values are different from the original
+                        break
+
+                # Replace the original 'str' values with the scrambled ones
+                particle_new[3::3] = str_values
+
+                for i in range(5-no_sources):  
+                    particle = np.hstack([particle_new, [np.nan, np.nan, np.nan]])
 
         weights_new = np.ones(N) / N
         
@@ -308,4 +362,3 @@ def sort_sources_by_strength(particles):
 
     return particles_new
 
-# Debugging: Compute radiation at agent location based on average particle prediction

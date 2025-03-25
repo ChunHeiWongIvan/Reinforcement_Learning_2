@@ -1,5 +1,5 @@
-# Reinforcement learning sections of the code based on official PyTorch Reinforcement Q-Learning (DQN) tutorial 
-# 
+# Reinforcement learning sections of the code based on official PyTorch Reinforcement Q-Learning (DQN) tutorial
+#
 # https://pytorch.org/tutorials/intermediate/reinforcement_q_learning.html
 
 import torch
@@ -10,13 +10,14 @@ import numpy as np
 import random
 import math
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
+import matplotlib.collections as collections
 from collections import namedtuple, deque
 from itertools import count
 import radiation_discrete
 import particle_filter as pf
 import pickle
 import os
-import winsound
 
 # Turns on interactive mode for MATLAB plots, so that plot is showed without use of plt.show()
 plt.ion()
@@ -25,7 +26,7 @@ np.set_printoptions(threshold=25, suppress=True, precision=2) # For debugging pu
 
 # Variables to control display/saving of results
 displayPlot = True
-displaySimulation = False
+displaySimulation = True
 displaySimulation_p = 100 # period (episodic) where simulation is displayed
 savePlot = True
 
@@ -37,7 +38,7 @@ device = torch.device( # Checks whether CUDA/MPS device is available for acceler
 
 print(f"Using {device} device")
 
-num_episodes = 2000 if torch.cuda.is_available() or torch.backends.mps.is_available() else 100
+num_episodes = 3000 if torch.cuda.is_available() or torch.backends.mps.is_available() else 1000
 
 # Initialising environment
 
@@ -62,18 +63,18 @@ source1 = radiation_discrete.source(source1_x, source1_y, radiation_level_1, sd_
 # Initalising source 2 parameters
 source2_x = 10
 source2_y = 35
-radiation_level_2 = 125 # mSv / hour
+radiation_level_2 = 140 # mSv / hour
 source2 = radiation_discrete.source(source2_x, source2_y, radiation_level_2, sd_noise_pct)
 
 # Initalising source 3 parameters
 source3_x = 40
 source3_y = 10
-radiation_level_3 = 125 # mSv / hour
+radiation_level_3 = 120 # mSv / hour
 source3 = radiation_discrete.source(source3_x, source3_y, radiation_level_3, sd_noise_pct)
 
 # Initialising agent parameters
-agent_x = 10
-agent_y = 10
+agent_x = 12
+agent_y = 12
 agent_moveDist = 1
 agent = radiation_discrete.agent(agent_x, agent_y, search_area_x, search_area_y, agent_moveDist)
 agent_positions = [] # Save past agent positions
@@ -117,7 +118,7 @@ class ReplayMemory(object):
 
     # deque = double-ended queue, can contain any data type, O(1) time complexity for adding/removing from both ends.
     def __init__(self, capacity):
-        self.memory = deque([], maxlen=capacity) 
+        self.memory = deque([], maxlen=capacity)
 
     # Updates memory with a new experience (contained in the 'Transition' named tuple). Each element in memory stores a named tuple.
     def push(self, *args):
@@ -163,8 +164,8 @@ target_net.load_state_dict(policy_net.state_dict())
 optimizer = optim.AdamW(policy_net.parameters(), lr=LR, amsgrad=True)
 memory = ReplayMemory(10000)
 
-steps_done = 0
-goal_dist_prob = np.array([[1/16, 1/16, 1/16, 1/16], 
+steps_done = 0 # Track number of steps done overall
+goal_dist_prob = np.array([[1/16, 1/16, 1/16, 1/16],
                            [1/16, 1/16, 1/16, 1/16],
                            [1/16, 1/16, 1/16, 1/16],
                            [1/16, 1/16, 1/16, 1/16]]) # To keep track of the probability of going to each goal per episode
@@ -177,19 +178,19 @@ goals = np.array([[[10, 40],[20, 40],[30, 40],[40, 40]],
 def select_goal_and_update_prob(goal_dist_prob, decay_rate=0.25):
     # Flatten the goal_dist_prob to easily pick one
     flat_prob = goal_dist_prob.flatten()
-    
+
     # Randomly choose a goal index based on the current probability distribution
     chosen_goal_idx = np.random.choice(len(flat_prob), p=flat_prob)
-    
+
     # Convert the flat index back to 2D coordinates (row, column)
     row, col = divmod(chosen_goal_idx, goal_dist_prob.shape[1])
-    
+
     # Decay the probability of the chosen goal by a certain factor
     goal_dist_prob[row, col] *= (1 - decay_rate)
-    
+
     # Normalize the probabilities so they sum to 1
     goal_dist_prob /= goal_dist_prob.sum()
-    
+
     return (row, col), goal_dist_prob
 
 def select_action(state, goal):
@@ -228,8 +229,11 @@ def select_action(state, goal):
 
 episode_end_distances = [] # Track distance to source at end of episode
 episode_lengths = [] # Track lengths of episodes
+map_plotted = False # Flag for whether radiation map has been plotted
+legend_plotted = False # Flag for whether legend has been plotted
 
 # Initialise plot objects
+fig_sim, ax_sim = plt.subplots(figsize=(9.6, 7.2))
 fig_d, ax_d = plt.subplots()
 fig_l, ax_l = plt.subplots()
 fig_l_e, ax_l_e = plt.subplots()
@@ -243,7 +247,7 @@ if not displayPlot:
     plt.close(4)
     plt.close(5)
 
-def plot_distance(show_result=False, window_size=100):   
+def plot_distance(show_result=False, window_size=100):
     # Convert array of data to torch tensor
     distances_t = torch.tensor(episode_end_distances, dtype=torch.float)
 
@@ -257,10 +261,10 @@ def plot_distance(show_result=False, window_size=100):
 
     ax_d.set_xlabel('Episode')
     ax_d.set_ylabel('Distance to source at the end of episode (m)')
-    ax_l_e.set_ylim(min(yticks), max(yticks) + 5) # Ensure y-axis is fixed 
+    ax_l_e.set_ylim(min(yticks), max(yticks) + 5) # Ensure y-axis is fixed
     ax_l_e.set_yticks(yticks)
     ax_d.plot(distances_t.numpy(), label="Raw data")
-    
+
     # Compute average values
     if len(distances_t) < window_size:
         # Compute running average for all episodes if < window_size
@@ -277,7 +281,7 @@ def plot_distance(show_result=False, window_size=100):
 
     # Pause for dynamic plotting
     plt.pause(0.001)
-    
+
     # Return the figure and axis objects for external access
     return fig_d, ax_d
 
@@ -290,15 +294,15 @@ def plot_length(show_result=False, window_size=100):
         ax_l.set_title('Result')
     else:
         ax_l.set_title('Training...')
-    
+
     yticks = [50, 60, 70, 80, 90, 100]
 
     ax_l.set_xlabel('Episode')
     ax_l.set_ylabel('Length of episode (steps taken)')
-    ax_l_e.set_ylim(min(yticks) - 5, max(yticks) + 5) # Ensure y-axis is fixed 
+    ax_l_e.set_ylim(min(yticks) - 5, max(yticks) + 5) # Ensure y-axis is fixed
     ax_l_e.set_yticks(yticks)
     ax_l.plot(lengths_t.numpy(), label="Raw data")
-    
+
     # Compute average values
     if len(lengths_t) < window_size:
         # Compute running average for all episodes if < window_size
@@ -315,7 +319,7 @@ def plot_length(show_result=False, window_size=100):
 
     # Pause for dynamic plotting
     plt.pause(0.001)
-    
+
     # Return the figure and axis objects for external access
     return fig_l, ax_l
 
@@ -335,7 +339,7 @@ def plot_loc_estimate(show_result=False):
 
     ax_l_e.set_xlabel('Episode')
     ax_l_e.set_ylabel('Coordinates')
-    ax_l_e.set_ylim(min(yticks), max(yticks) + 5) # Ensure y-axis is fixed 
+    ax_l_e.set_ylim(min(yticks), max(yticks) + 5) # Ensure y-axis is fixed
     ax_l_e.set_yticks(yticks)
 
     # Plot lines (convergence excluded)
@@ -365,7 +369,7 @@ def plot_strength_estimate(show_result=False):
     # Plot source strength estimate first
     ax_s_e.set_xlabel('Episode')
     ax_s_e.set_ylabel('Counts per minute (CPM)')
-    ax_s_e.set_ylim(min(yticks), max(yticks) + 25) # Ensure y-axis is fixed 
+    ax_s_e.set_ylim(min(yticks), max(yticks) + 25) # Ensure y-axis is fixed
     ax_s_e.set_yticks(yticks)
     ax_s_e.plot(source_strength.numpy(), label="Source strength", color="gray")
 
@@ -393,10 +397,10 @@ def plot_number_estimate(show_result=False):
     # Plot number of sources
     ax_n_e.set_xlabel('Episode')
     ax_n_e.set_ylabel('Number of sources')
-    ax_n_e.set_ylim(min(yticks), max(yticks) + 1) # Ensure y-axis is fixed 
+    ax_n_e.set_ylim(min(yticks), max(yticks) + 1) # Ensure y-axis is fixed
     ax_n_e.set_yticks(yticks)
     ax_n_e.plot(source_no.numpy(), label="Number of sources", color=(0.8, 0.5, 0.2))
-    
+
     # Show legend
     ax_n_e.legend()
 
@@ -479,7 +483,7 @@ for i_episode in range(num_episodes):
 
         weights = pf.update_weights(weights, likelihood) # Update weights according to likelihood
 
-        particles, weights, need_resample, pertubations = pf.resampling_simple(particles, weights, min_no_sources, max_no_sources, min_radiation_level, max_radiation_level) # Resample if needed
+        particles, weights, need_resample, pertubations = pf.resampling_simple(particles, weights, min_no_sources, max_no_sources, min_radiation_level, max_radiation_level, EPS_START, EPS_END, EPS_DECAY, steps_done) # Resample if needed
 
         if need_resample:
             particles = pf.sort_sources_by_strength(particles) # Only need to re-sort if resampling occurs (weight changes do not affect particle parameters)
@@ -513,7 +517,7 @@ for i_episode in range(num_episodes):
         if np.linalg.norm(np.array([largest_estimate_and_no[0], largest_estimate_and_no[1]]) - np.array([agent.x(), agent.y()])) <= 2.0 and estimate_convergence == True: # Terminate episode if agent thinks it is within 2 meters of source, and only if the STE converged already
             terminated = True
             truncated = False
-            reward = 0.025*total_radiation_level
+            reward = 0.25*total_radiation_level # Big reward for reaching source estimate (depends on actual radiation level recorded so false positives are not rewarded)
             print(f"Reward: {reward:.3f} (reached within 2 m of source estimate)")
         elif agent.actionPossible() == False:
             terminated = True
@@ -533,34 +537,65 @@ for i_episode in range(num_episodes):
         reward = torch.tensor([reward], device=device)
 
         if i_episode % displaySimulation_p == 0 and displaySimulation: # Only show simulation of episodes which are multiples of 100 (including 0).
-            plt.figure(2)
-            plt.clf()  # Clear the figure
-    
-            # Re-plot the radiation map and radiation source
-            plt.contourf(rad_X, rad_Y, Z_clipped, 400, cmap='viridis')
-            plt.colorbar()
-            plt.plot(source1.x(), source1.y(), 'ro', markersize=4)
-            plt.plot(source2.x(), source2.y(), 'o', markersize=4, color='lightcoral')
-            plt.plot(source3.x(), source3.y(), 'o', markersize=4, color='lightcoral')
-    
+             
+            for artist in ax_sim.get_children(): # Only clear data points so that radiation map only needs to be plot once
+                if isinstance(artist, plt.Line2D) or isinstance(artist, collections.PathCollection):
+                    artist.remove()
+
+            # Plot the radiation map once
+            if not map_plotted:
+                contour = ax_sim.contourf(rad_X, rad_Y, Z_clipped, levels=np.logspace(np.log10(0.1), np.log10(1000), num=400), cmap='viridis', norm=LogNorm(vmin=0.1, vmax=1000), zorder=0)
+                
+                cbar = fig_sim.colorbar(contour, ax=ax_sim) # Add colorbar with log scale
+                cbar.set_ticks([0.1, 1, 10, 100, 1000])  # Log ticks
+
+                map_plotted = True # only plot for first time
+
+            src_1 = ax_sim.scatter(source1.x(), source1.y(), marker='*', s=200, edgecolors='red', facecolors='none', zorder=3, label=r'$I_0 = 200$') # Strongest source
+            src_2 = ax_sim.scatter(source2.x(), source2.y(), marker='*', s=200, edgecolors='black', facecolors='none', zorder=3, label=r'$I_0 = 140$') # Source 2
+            src_3 = ax_sim.scatter(source3.x(), source3.y(), marker='*', s=200, edgecolors='white', facecolors='none', zorder=3, label=r'$I_0 = 120$') # Source 3
+
+            if not legend_plotted:
+                legend1 = ax_sim.legend(loc='lower left', bbox_to_anchor=(0, 0.2), title='True sources', fontsize=8, title_fontsize=8) # Add first legend for actual source locations
+                ax_sim.add_artist(legend1)
+
+                legend_plotted = True
+
             # Append the agent's current position to the path
             agent_path.append((agent.x(), agent.y()))
 
             # Show the path of the agent
             for pos in agent_path:
-                plt.plot(pos[0], pos[1], marker='o', color=(0.2, 0.8, 0), markersize=2)
+                path = ax_sim.plot(pos[0], pos[1], marker='o', color=(0.0, 0.7, 0.0), markersize=2, zorder=2)
 
             # Show the agent's current position as a distinct marker
-            plt.plot(agent.x(), agent.y(), marker='x', color=(0.2, 0.8, 0), markersize=6)
+            pos = ax_sim.plot(agent.x(), agent.y(), marker='x', color=(0.0, 0.7, 0.0), markersize=6, zorder=2)
 
-            # Show particles in particle filter
-            for particle in particles:
-                for source in range(int(particle[0])): # Iterate over every source the particle is predicting                    
-                    plt.plot(particle[3*source + 1], particle[3*source + 2], marker='.', color=(1, 1, 1), markersize=1)
-    
+            colors = ['cyan', 'orange', 'lime', 'yellow', 'pink'] # To distinguish between source prediction number in plotting
+
+            # Show particles in particle filter (color coded by source prediction no.)
+
+            src_handles = []
+            src_labels = []
+
+            for i in range(max_no_sources):
+                # Select columns corresponding to specific source prediction
+                source_prediction = particles[:, [3*i + 1, 3*i + 2]]
+
+                # Filter rows where neither column has NaN
+                filtered_data = source_prediction[~np.isnan(source_prediction).any(axis=1)]
+
+                if not len(filtered_data) == 0:
+                    src = ax_sim.scatter(filtered_data[:, 0], filtered_data[:, 1], marker='.', s=2, color=colors[i], label=f'{i+1}', zorder=2)
+                    src_handles.append(src)
+                    src_labels.append(f'{i+1}')
+
             # Pause briefly to update the plot
-            plt.xlim(0, search_area_x)
-            plt.ylim(0, search_area_y)
+
+            ax_sim.legend(handles = src_handles, labels = src_labels, title="Estimated sources", loc='lower left', bbox_to_anchor=(0, 0), markerscale=4, fontsize=8, title_fontsize=8) # Show estimated legend
+
+            ax_sim.set_xlim(0, search_area_x)
+            ax_sim.set_ylim(0, search_area_y)
             plt.pause(0.000001)
 
         done = terminated or truncated
@@ -575,9 +610,9 @@ for i_episode in range(num_episodes):
             source_counts, bins = np.histogram(num_sources_int, bins=bins)
 
             largest_STE_mean = torch.tensor([
-                all_STE_x_mean[0], 
-                all_STE_y_mean[0], 
-                all_STE_strength_mean[0], 
+                all_STE_x_mean[0],
+                all_STE_y_mean[0],
+                all_STE_strength_mean[0],
                 np.argmax(source_counts) + 1  # Convert to a scalar directly
             ], dtype=torch.float32)
 
@@ -599,12 +634,12 @@ for i_episode in range(num_episodes):
                 estimate_convergence = True
             else:
                 estimate_convergence = False
-            
+
             print(f"Goal chosen for episode: ({goal[0]:.2f}, {goal[1]:.2f})")
             print(f"Estimated strongest source x: {largest_estimate_and_no[0]:.2f}, Estimated strongest source y: {largest_estimate_and_no[1]:.2f}, Estimated strongest source strength: {largest_estimate_and_no[2]:.2f}, Estimated number of sources: {largest_estimate_and_no[3]:.2f}")
             print(f"Strongest source x standard deviation: {np.sqrt(all_STE_x_var[0]):.2f}, Strongest source y standard deviation: {np.sqrt(all_STE_y_var[0]):.2f}, Strongest source strength standard deviation: {np.sqrt(all_STE_strength_var[0]):.2f}")
             print(f"Estimate convergence: {'True' if estimate_convergence else 'False'} \n")\
-            
+
             small_STE_x_mean = all_STE_x_mean[1:]
             small_STE_y_mean = all_STE_y_mean[1:]
             small_STE_strength_mean = all_STE_strength_mean[1:]
@@ -666,25 +701,26 @@ if savePlot: # Save plot object as tuple in external file using pickle
     current_dir = os.getcwd()
     sub_dir = "multi_source_results"
 
+    # Ensure the subdirectory exists
+    os.makedirs(sub_dir, exist_ok=True)
+
     with open(os.path.join(sub_dir, "distance_plot.pkl"), "wb") as file:
         pickle.dump((fig_d, ax_d), file)
 
-    with open(os.path.join(sub_dir,"length_plot.pkl", "wb")) as file:
+    with open(os.path.join(sub_dir,"length_plot.pkl"), "wb") as file:
         pickle.dump((fig_l, ax_l), file)
 
-    with open(os.path.join(sub_dir,"location_plot.pkl", "wb")) as file:
+    with open(os.path.join(sub_dir,"location_plot.pkl"), "wb") as file:
         pickle.dump((fig_l_e, ax_l_e), file)
-        
-    with open(os.path.join(sub_dir,"strength_plot.pkl", "wb")) as file:
+
+    with open(os.path.join(sub_dir,"strength_plot.pkl"), "wb") as file:
         pickle.dump((fig_s_e, ax_s_e), file)
 
-    with open(os.path.join(sub_dir,"number_plot.pkl", "wb")) as file:
+    with open(os.path.join(sub_dir,"number_plot.pkl"), "wb") as file:
         pickle.dump((fig_n_e, ax_n_e), file)
 
     folder_path = os.path.join(current_dir, sub_dir)
     print(f"File saved at: {folder_path}")
-
-winsound.MessageBeep() # Just to give a sound a notification that simulation is complete
 
 plt.ioff()
 plt.show()
