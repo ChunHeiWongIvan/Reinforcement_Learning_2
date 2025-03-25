@@ -112,7 +112,7 @@ def likelihood(agent_x, agent_y, particles, measured, sd_noise_pct, min_radiatio
         two_d_particle = extract_source_coordinates(particle)
 
 
-        if check_within_distance(two_d_particle, 5) or coordinates_out_of_bounds(two_d_particle): # If sources are within 2 m of each other, or prediction out of bounds then its invalid
+        if check_within_distance(two_d_particle, 5) or coordinates_out_of_bounds(two_d_particle): # If sources are within 5 m of each other, or prediction out of bounds then its invalid
             likelihood[i] = 0
 
     return likelihood

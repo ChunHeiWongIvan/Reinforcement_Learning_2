@@ -240,12 +240,15 @@ fig_l_e, ax_l_e = plt.subplots()
 fig_s_e, ax_s_e = plt.subplots()
 fig_n_e, ax_n_e = plt.subplots()
 
-if not displayPlot:
+if not displaySimulation:
     plt.close(1)
+
+if not displayPlot:
     plt.close(2)
     plt.close(3)
     plt.close(4)
     plt.close(5)
+    plt.close(6)
 
 def plot_distance(show_result=False, window_size=100):
     # Convert array of data to torch tensor
@@ -536,6 +539,8 @@ for i_episode in range(num_episodes):
 
         reward = torch.tensor([reward], device=device)
 
+        done = terminated or truncated # Check if episode is complete
+
         if i_episode % displaySimulation_p == 0 and displaySimulation: # Only show simulation of episodes which are multiples of 100 (including 0).
              
             for artist in ax_sim.get_children(): # Only clear data points so that radiation map only needs to be plot once
@@ -598,7 +603,19 @@ for i_episode in range(num_episodes):
             ax_sim.set_ylim(0, search_area_y)
             plt.pause(0.000001)
 
-        done = terminated or truncated
+            if savePlot and done: # Save plot object as tuple in external file using pickle
+
+                sub_dir = "multi_source_results"
+                sim_sub_dir = "simulation_results"
+
+                full_dir = os.path.join(sub_dir, sim_sub_dir)
+
+                # Ensure the subdirectory exists
+                os.makedirs(sub_dir, exist_ok=True)
+
+                os.makedirs(full_dir, exist_ok=True)
+
+                fig_sim.savefig(os.path.join(full_dir, f"episode_{i_episode + 1}"), bbox_inches='tight')
 
         if done:
             next_state = None
