@@ -30,22 +30,24 @@ def create_uniform_particles(x_range, y_range, strength_range, no_sources_range,
 
     return particles
 
+# Debugging: Initialise cheat particles at correct location
+
+def create_cheat_particles(no_sources, source1, source2, source3, no_sources_range, N):
+
+    # Structure of array row (each row represents one particle):
+    # (N, x_1, y_1, strength_1, ... , x_N, y_N, strength_N),  where N is the number of sources predicted by one particle
+
+    particles = np.full((N, 3*no_sources_range[1] + 1), np.nan) # Initalise array and fill with nan values (in order to have blank values when no. of source estimate is less than the max number)
+
+    particles[:] = [no_sources, source1.x(), source1.y(), source1.source_radioactivity, source2.x(), source2.y(), source2.source_radioactivity, source3.x(), source3.y(), source3.source_radioactivity, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan]
+
+    return particles
+
 # 2. No need for predict step as the source is static (position and strength) (half-life of sources markedly exceeds duration of localization)
 
 # 3. Compute likelihood of particle representing the true state (source parameters) given the observation (sensor reading), using posterior distribution
 
 # Check distance between sources and send likelihood of predictions that predict sources within 5 m of each other to 0
-def calculate_spread_np(coords):
-    # Calculates spread of coordinates using NumPy
-    coords = np.array(coords)
-    
-    # Standard deviation in x and y directions
-    std_dev = np.std(coords, axis=0)
-    
-    # Combined spread (Euclidean)
-    spread = np.sqrt(np.var(coords[:, 0]) + np.var(coords[:, 1]))
-    
-    return spread
 
 def check_within_distance(coords, distance_threshold=5):
     coords = np.array(coords)
@@ -134,6 +136,8 @@ def update_weights(weights_old, likelihood):
 
 def estimate(particles, weights):
     
+    max_no_sources = (particles.shape[1] - 1) / 3
+
     # Convert particles and weights to torch tensors (if they aren't already)
     particles = torch.tensor(particles, dtype=torch.float32)
     weights = torch.tensor(weights, dtype=torch.float32)
@@ -141,18 +145,18 @@ def estimate(particles, weights):
     # Find the mode (most common value) of the number of sources across all particles
 
     num_sources = particles[:, 0].int()  # First column is the number of sources (N)
-    mode_n_sources = np.bincount(num_sources.numpy()).argmax()  # Find the mode using numpy's bincount function
+    mode_no_sources = np.bincount(num_sources.numpy()).argmax()  # Find the mode using numpy's bincount function
     
     # Filter particles with the mode number of sources
-    filtered_particles = particles[num_sources == mode_n_sources]
-    filtered_weights = weights[num_sources == mode_n_sources]
+    filtered_particles = particles[num_sources == mode_no_sources]
+    filtered_weights = weights[num_sources == mode_no_sources]
 
     # Initialize lists for storing weighted means and variances
     mean_x_pos, mean_y_pos, mean_strength = [], [], []
     var_x_pos, var_y_pos, var_strength = [], [], []
 
     # Iterate over each source to compute weighted means and variances
-    for source in range(mode_n_sources):
+    for source in range(mode_no_sources):
         x_vals = filtered_particles[:, 3 * source + 1]
         y_vals = filtered_particles[:, 3 * source + 2]
         strengths = filtered_particles[:, 3 * source + 3]
@@ -174,6 +178,15 @@ def estimate(particles, weights):
         var_x_pos.append(var_x.item())
         var_y_pos.append(var_y.item())
         var_strength.append(var_c.item())
+    
+    missing_values = int(max_no_sources - mode_no_sources)
+
+    mean_x_pos += [np.nan] * missing_values
+    mean_y_pos += [np.nan] * missing_values
+    mean_strength += [np.nan] * missing_values
+    var_x_pos += [np.nan] * missing_values
+    var_y_pos += [np.nan] * missing_values
+    var_strength += [np.nan] * missing_values
 
     return mean_x_pos, mean_y_pos, mean_strength, var_x_pos, var_y_pos, var_strength
     
@@ -190,6 +203,8 @@ def resampling_simple(particles, weights, min_no_sources, max_no_sources, min_ra
     ess = 1 / np.sum(weights**2)
 
     EPS_END = 0.10 # Custom minimum eps so particles always maintain some kind of diversity
+
+    EPS_DECAY = 40000 # Custom, lower eps_decay so that perturbance decays faster
 
     eps_threshold = EPS_END + (EPS_START - EPS_END) * math.exp(-1. * steps_done / EPS_DECAY)
 
@@ -319,9 +334,9 @@ def resampling_simple(particles, weights, min_no_sources, max_no_sources, min_ra
 
         weights_new = np.ones(N) / N
         
-        return particles_result, weights_new, need_resample, sum(abs(elem) for row in perturbations for elem in row) # Find total pertubations for debugging
+        return particles_result, weights_new, need_resample
     
-    return particles, weights, need_resample, None
+    return particles, weights, need_resample
 
 # Bonus: Weighted particle sample for goal-directed RL
 
@@ -336,29 +351,35 @@ def weighted_particle_sample(particles, weights):
 
 # Bonus 2: Sort particle source parameters within array by strength of source
 
-def sort_sources_by_strength(particles):
+def sort_sources_by_strength(particles): # Improved vectorized implementation which is 3-7x faster than original loop implementation
 
-    particles_new = particles
+    # Sorts sources in descending strength order
 
-    for i in range(len(particles)):
-        no_sources = int(particles[i, 0])  # The number of sources for the current particle
-        sources = []
-
-        # Extract source details (x, y, strength) for the current particle
-        for j in range(no_sources):
-            x = particles[i, 3*j + 1]
-            y = particles[i, 3*j + 2]
-            strength = particles[i, 3*j + 3]
-            sources.append((x, y, strength))
-
-        # Sort sources by strengthentration (descending order)
-        sources.sort(key=lambda x: x[2], reverse=True)
-
-        # Update the particle's data with the sorted sources
-        for j, (x, y, strength) in enumerate(sources):
-            particles_new[i, 3*j + 1] = x
-            particles_new[i, 3*j + 2] = y
-            particles_new[i, 3*j + 3] = strength
-
+    N = particles.shape[0]
+    max_sources = (particles.shape[1] - 1) // 3
+    
+    # Reshape the source part into shape (N, max_sources, 3)
+    sources = particles[:, 1:].reshape(N, max_sources, 3)
+    
+    # Get the strength values for each source (shape: (N, max_sources))
+    strength = sources[:, :, 2]
+    
+    # Replace NaN values with -infinity so that they sort to the end in descending order
+    strength_adj = np.where(np.isnan(strength), -np.inf, strength)
+    
+    # Get sorting indices that would sort in descending order
+    # (largest strength first, and NaNs -∞ at the end)
+    sort_idx = np.argsort(-strength_adj, axis=1)
+    
+    # Rearrange sources using these indices
+    sorted_sources = np.take_along_axis(sources, sort_idx[..., None], axis=1)
+    
+    # Reassemble particles:
+    # The first column remains the same (number of sources),
+    # then the sorted sources (flattened to 1D per row).
+    particles_new = np.empty_like(particles)
+    particles_new[:, 0] = particles[:, 0]
+    particles_new[:, 1:] = sorted_sources.reshape(N, -1)
+    
     return particles_new
 

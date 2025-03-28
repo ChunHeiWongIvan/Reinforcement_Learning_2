@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
+from statsmodels.stats.weightstats import DescrStatsW # for calaculating weighted variance
 import random
 import math
 import matplotlib.pyplot as plt
@@ -22,8 +23,6 @@ import os
 # Turns on interactive mode for MATLAB plots, so that plot is showed without use of plt.show()
 plt.ion()
 
-np.set_printoptions(threshold=25, suppress=True, precision=2) # For debugging purposes so that np.arrays print cleaner
-
 # Variables to control display/saving of results
 displayPlot = True
 displaySimulation = True
@@ -38,7 +37,7 @@ device = torch.device( # Checks whether CUDA/MPS device is available for acceler
 
 print(f"Using {device} device")
 
-num_episodes = 3000 if torch.cuda.is_available() or torch.backends.mps.is_available() else 1000
+num_episodes = 2000 if torch.cuda.is_available() or torch.backends.mps.is_available() else 500
 
 # Initialising environment
 
@@ -95,21 +94,40 @@ N = 2500 # Number of particles
 
 particles = pf.create_uniform_particles((0, search_area_x), (0, search_area_y), (min_radiation_level, max_radiation_level), (min_no_sources, max_no_sources), N) # Initialise particles randomly in search area/ strength/ no. of sources
 
+# particles = pf.create_cheat_particles(3, source1, source2, source3, (min_no_sources, max_no_sources), N)
+
 particles = pf.sort_sources_by_strength(particles) # Ensure source with strongest strength comes first in the array
 
 weights = np.ones(N) / N # All weights initalised equally
 
-# Current (up to current episode) estimate of source parameters
-largest_estimate_and_no = torch.tensor([search_area_x/2, search_area_y/2, max_radiation_level/2, max_no_sources/2]) # Initalise with guess estimate (mean of min/max bounds)
+mean_no_sources = (min_no_sources + max_no_sources) / 2
 
-source_term_estimates = torch.zeros(0, 4, dtype=torch.float32) # Initalise tensor to track the culmulative STE to compute moving average
+# Track mean of belief state (moving average)
+belief_state_mean = torch.cat([torch.tensor([mean_no_sources]), 
+                          torch.tensor([search_area_x/2, search_area_y/2, (min_radiation_level + max_radiation_level) / 2]).repeat(int(mean_no_sources)),
+                          torch.tensor([np.nan, np.nan, np.nan]).repeat(max_no_sources - int(mean_no_sources))]) # Initalise with guess estimate of all parameters (mean of min/max bounds), pad empty sources with np.nan
+
+# Track variance of belief state (moving average)
+belief_state_var = torch.cat([torch.tensor([mean_no_sources]), 
+                          torch.tensor([0.25, 0.25, 0.25]).repeat(int(mean_no_sources)), # 0.25 is 0.5^2, which is the initial perturbance used in resampling
+                          torch.tensor([np.nan, np.nan, np.nan]).repeat(max_no_sources - int(mean_no_sources))]) # Initalise with guess estimate of all parameters (mean of min/max bounds), pad empty sources with np.nan
+
+belief_state_mean_over_time = torch.zeros(0, 3*max_no_sources + 1, dtype=torch.float32) # Initalise tensor to track the culmulative STE to compute moving average
 
 window_size = 25 # Moving average subset size
 
-# Initialise a deque to hold the last 'window_size' STE values
-moving_average_queue = deque(maxlen=window_size)
+# Initialise a deque to hold the last 'window_size' STE mean to compute moving average
+moving_average_queue_mean = deque(maxlen=window_size)
 
-estimate_convergence = False # To track whether STE has converged
+# Initalise a deque to hold the last 'window_size' STE var to compute moving average
+moving_average_queue_var = deque(maxlen=window_size)
+
+convergence_stable = np.array([False, False, False]) # To track whether STEs is stable and converged
+episode_converged = np.zeros(3, dtype=np.int64) # To track at which episode STEs is converged and stable
+convergence_tracking = np.zeros(3, dtype=np.int64) # Require a sustained period of convergence before actually recognising stability (tracking all sources)
+plot_x_1 = [] # To keep track of all episodes since STE 1 has converged
+plot_x_2 = [] # To keep track of all episodes since STE 1 has converged
+plot_x_3 = [] # To keep track of all episodes since STE 1 has converged
 
 # Named tuple allows access to its elements using named fields. Unlike dictionaries, more memory efficient and the named fields are immutable.
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
@@ -148,10 +166,10 @@ class DQN(nn.Module):
 BATCH_SIZE = 32
 GAMMA = 0.99
 EPS_START = 1.0
-EPS_END = 0.00
-EPS_DECAY = 50000 # Episilon decays per step done (20000 steps ~ 200 full length episodes)
+EPS_END = 0.0
+EPS_DECAY = 80000 # Episilon decays per step done (80000 steps ~ 600 full length episodes)
 TAU = 0.005
-LR = 0.002 # was 0.001
+LR = 0.001 # Sparse rewards so lower LR might help stabilise training
 GOAL_PROB = 0.5 # Probability of goal-directed exploration instead of random exploration
 
 n_actions = len(actions)
@@ -162,7 +180,7 @@ target_net = DQN(n_observations, n_actions).to(device)
 target_net.load_state_dict(policy_net.state_dict())
 
 optimizer = optim.AdamW(policy_net.parameters(), lr=LR, amsgrad=True)
-memory = ReplayMemory(10000)
+memory = ReplayMemory(10000) # 10000 = 100 full length episodes
 
 steps_done = 0 # Track number of steps done overall
 goal_dist_prob = np.array([[1/16, 1/16, 1/16, 1/16],
@@ -239,6 +257,7 @@ fig_l, ax_l = plt.subplots()
 fig_l_e, ax_l_e = plt.subplots()
 fig_s_e, ax_s_e = plt.subplots()
 fig_n_e, ax_n_e = plt.subplots()
+fig_l_er, ax_l_er = plt.subplots()
 
 if not displaySimulation:
     plt.close(1)
@@ -249,6 +268,7 @@ if not displayPlot:
     plt.close(4)
     plt.close(5)
     plt.close(6)
+    plt.close(7)
 
 def plot_distance(show_result=False, window_size=100):
     # Convert array of data to torch tensor
@@ -298,12 +318,12 @@ def plot_length(show_result=False, window_size=100):
     else:
         ax_l.set_title('Training...')
 
-    yticks = [50, 60, 70, 80, 90, 100]
+    yticks = [50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150]
 
     ax_l.set_xlabel('Episode')
     ax_l.set_ylabel('Length of episode (steps taken)')
-    ax_l_e.set_ylim(min(yticks) - 5, max(yticks) + 5) # Ensure y-axis is fixed
-    ax_l_e.set_yticks(yticks)
+    ax_l.set_ylim(min(yticks) - 5, max(yticks) + 5) # Ensure y-axis is fixed
+    ax_l.set_yticks(yticks)
     ax_l.plot(lengths_t.numpy(), label="Raw data")
 
     # Compute average values
@@ -328,8 +348,8 @@ def plot_length(show_result=False, window_size=100):
 
 def plot_loc_estimate(show_result=False):
     # Split data into separate tensors
-    x_coord = source_term_estimates[:, 0]
-    y_coord = source_term_estimates[:, 1]
+    x_coord = belief_state_mean_over_time[:, 1]
+    y_coord = belief_state_mean_over_time[:, 2]
 
     ax_l_e.cla()  # Clear the current axis
 
@@ -358,7 +378,9 @@ def plot_loc_estimate(show_result=False):
 
 def plot_strength_estimate(show_result=False):
     # Split data into separate tensors
-    source_strength = source_term_estimates[:, 2]
+    source_strength_1 = belief_state_mean_over_time[:, 3]
+    source_strength_2 = belief_state_mean_over_time[:, 6]
+    source_strength_3 = belief_state_mean_over_time[:, 9]
 
     ax_s_e.cla()  # Clear the current axis
 
@@ -371,10 +393,12 @@ def plot_strength_estimate(show_result=False):
 
     # Plot source strength estimate first
     ax_s_e.set_xlabel('Episode')
-    ax_s_e.set_ylabel('Counts per minute (CPM)')
+    ax_s_e.set_ylabel('Rate of biological dose (mSv/h)')
     ax_s_e.set_ylim(min(yticks), max(yticks) + 25) # Ensure y-axis is fixed
     ax_s_e.set_yticks(yticks)
-    ax_s_e.plot(source_strength.numpy(), label="Source strength", color="gray")
+    ax_s_e.plot(source_strength_1.numpy(), label="Source 1", color="black")
+    ax_s_e.plot(source_strength_2.numpy(), label="Source 2", color="darkgray")
+    ax_s_e.plot(source_strength_3.numpy(), label="Source 3", color="lightgray")
 
     ax_s_e.legend()
 
@@ -386,7 +410,7 @@ def plot_strength_estimate(show_result=False):
 
 def plot_number_estimate(show_result=False):
     # Split data into separate tensors
-    source_no = source_term_estimates[:, 3]
+    source_no = belief_state_mean_over_time[:, 0]
 
     ax_n_e.cla()  # Clear the current axis
 
@@ -412,6 +436,51 @@ def plot_number_estimate(show_result=False):
 
     # Return the figure and axis objects for external access
     return fig_n_e, ax_n_e
+
+def plot_loc_error(show_result=False): # Not automatically generalised to any other no. of sources
+    
+    if not convergence_stable[0]: # No plot if largest estimate hasn't converged (tends to converge first)
+        return fig_l_er, ax_l_er
+
+    x_1 = belief_state_mean_over_time[:, 1]
+    y_1 = belief_state_mean_over_time[:, 2]
+
+    x_2 = belief_state_mean_over_time[:, 4]
+    y_2 = belief_state_mean_over_time[:, 5]   
+
+    x_3 = belief_state_mean_over_time[:, 7]
+    y_3 = belief_state_mean_over_time[:, 8]
+
+    dist1 = torch.sqrt((x_1 - source1.x()) ** 2 + (y_1 - source1.y()) ** 2) # Calculate distance between estimate and true source
+    dist2 = torch.sqrt((x_2 - source2.x()) ** 2 + (y_2 - source2.y()) ** 2)
+    dist3 = torch.sqrt((x_3 - source3.x()) ** 2 + (y_3 - source3.y()) ** 2)
+
+    ax_l_er.cla()  # Clear the current axis
+
+    if show_result:
+        ax_l_er.set_title('Result')
+    else:
+        ax_l_er.set_title('Training...')
+
+    ax_l_er.set_xlabel('Episode')
+    ax_l_er.set_ylabel('Distance between estimate and true source (m)')
+
+    # Plot lines (only when each source estimate has converged)
+    ax_l_er.plot(plot_x_1, dist1[episode_converged[0]:].numpy(), label="Source 1", color="cyan") # Explicitly cast to int for slicing
+
+    if convergence_stable[1]:
+        ax_l_er.plot(plot_x_2, dist2[episode_converged[1]:].numpy(), label="Source 2", color="magenta")
+
+    if convergence_stable[2]:
+        ax_l_er.plot(plot_x_3, dist3[episode_converged[2]:].numpy(), label="Source 3", color="yellow")
+    
+    ax_l_er.legend()
+
+    # Pause for dynamic plotting
+    plt.pause(0.001)
+
+    # Return the figure and axis objects for external access
+    return fig_l_er, ax_l_er
 
 def optimize_model():
     if len(memory) < BATCH_SIZE:
@@ -467,11 +536,9 @@ for i_episode in range(num_episodes):
             chosen_goal, goal_dist_prob = select_goal_and_update_prob(goal_dist_prob)
             goal = goals[chosen_goal]
         elif source_goal_or_random_goal == 2: # Choose one of the sources as goal coordinates
-            goal_chosen = random.randint(1, len(all_STE_x_mean))
-            if goal_chosen == 1:
-                goal = [largest_estimate_and_no[0], largest_estimate_and_no[1]]
-            else:
-                goal = [all_STE_x_mean[goal_chosen - 1], all_STE_y_mean[goal_chosen - 1]]
+            belief_state_mean_np = belief_state_mean.cpu().numpy()  # Ensure it's on the CPU before converting
+            goal_chosen = random.randint(0, ((np.sum(~np.isnan(belief_state_mean_np))) - 1)/3 - 1) # Finds out the no. of sources of belief state then chooses random source
+            goal = [belief_state_mean[3*goal_chosen + 1], belief_state_mean[3*goal_chosen + 2]]
 
 
     for t in count():
@@ -486,26 +553,10 @@ for i_episode in range(num_episodes):
 
         weights = pf.update_weights(weights, likelihood) # Update weights according to likelihood
 
-        particles, weights, need_resample, pertubations = pf.resampling_simple(particles, weights, min_no_sources, max_no_sources, min_radiation_level, max_radiation_level, EPS_START, EPS_END, EPS_DECAY, steps_done) # Resample if needed
+        particles, weights, need_resample = pf.resampling_simple(particles, weights, min_no_sources, max_no_sources, min_radiation_level, max_radiation_level, EPS_START, EPS_END, EPS_DECAY, steps_done) # Resample if needed
 
         if need_resample:
             particles = pf.sort_sources_by_strength(particles) # Only need to re-sort if resampling occurs (weight changes do not affect particle parameters)
-
-        all_STE_x_mean, all_STE_y_mean, all_STE_strength_mean, all_STE_x_var, all_STE_y_var, all_STE_strength_var,= pf.estimate(particles, weights) # Fetch tentative estimate of source location/ strength/ no. of sources
-
-        # print(f"\nAgent location: ({agent.x()},{agent.y()})")
-        # print(f"Measured: {total_radiation_level:.3f}")
-
-        radiation_using_prediction = 0
-
-        for j in range(len(all_STE_x_mean)):
-            dist = np.sqrt((agent.x() - all_STE_x_mean[j])**2 + (agent.y() - all_STE_y_mean[j])**2)
-            if dist < 1:
-                radiation_using_prediction += all_STE_strength_mean[j]
-            else:
-                radiation_using_prediction += all_STE_strength_mean[j] / dist**2
-
-        # print(f"Predicted radiation: {radiation_using_prediction:.3f}")
 
         action = select_action(state, goal)
 
@@ -513,26 +564,25 @@ for i_episode in range(num_episodes):
         actions[i]()
 
         observation = agent.state()
-        reward = -0.01
+        reward = -0.02
 
 # Terminate on both the convergence of source estimation/ close to source term estimate
 
-        if np.linalg.norm(np.array([largest_estimate_and_no[0], largest_estimate_and_no[1]]) - np.array([agent.x(), agent.y()])) <= 2.0 and estimate_convergence == True: # Terminate episode if agent thinks it is within 2 meters of source, and only if the STE converged already
+        if np.linalg.norm(np.array([belief_state_mean[1], belief_state_mean[2]]) - np.array([agent.x(), agent.y()])) <= 2.0 and convergence_stable[0] == True: # Terminate episode if agent thinks it is within 2 meters of source, and only if the STE converged already
             terminated = True
             truncated = False
-            reward = 0.25*total_radiation_level # Big reward for reaching source estimate (depends on actual radiation level recorded so false positives are not rewarded)
-            print(f"Reward: {reward:.3f} (reached within 2 m of source estimate)")
-        elif agent.actionPossible() == False:
-            terminated = True
-            truncated = False
-            agent.moveCount = 100 # So that results plot of episode length only shows below 100 for successful episodes
-            reward = -0.025*largest_estimate_and_no[2]
-            print(f"Reward: {reward:.3f} (exited search area)")
-        elif agent.count() >= 100:
+            reward = 0.175*total_radiation_level # Big reward for reaching source estimate (depends on actual radiation level recorded so false positives are not rewarded)
+            print(f"Reward: {reward:.3f} (reached within 2 m of source estimate in {agent.count()} steps)")
+        elif agent.count() >= 150: # changed from 100
             terminated = False
             truncated = True
-            reward = 0.01*(largest_estimate_and_no[2] - 3*(math.sqrt(largest_estimate_and_no[2] / total_radiation_level) - 2))
-            print(f"Reward: {reward:.3f} (episode reached 100 steps)")
+            # Initially estimate might be inaccurate but is still far away from starting location, so it motivates agent to leave starting location
+            reward = 0.05*(53.15 - np.linalg.norm(np.array([agent.x(), agent.y()]) - np.array([belief_state_mean[1], belief_state_mean[2]]))) # Based on distance to largest state estimate (53.15 is maximum distance from source)
+            print(f"Reward: {reward:.3f} (episode reached 150 steps)")
+        elif agent.actionPossible() == False: # Discourage agent from attempting to exit search area
+            terminated = False
+            truncated = False
+            reward = -0.0025*belief_state_mean[3] # Was -0.025 (reduced to prevent agent from only aiming to avoid the edge)
         else:
             terminated = False
             truncated = False
@@ -541,7 +591,7 @@ for i_episode in range(num_episodes):
 
         done = terminated or truncated # Check if episode is complete
 
-        if i_episode % displaySimulation_p == 0 and displaySimulation: # Only show simulation of episodes which are multiples of 100 (including 0).
+        if ((i_episode + 1) % displaySimulation_p == 0 or (i_episode + 1) == 1) and displaySimulation: # Only show simulation of episodes which are multiples of 100, and the first episode
              
             for artist in ax_sim.get_children(): # Only clear data points so that radiation map only needs to be plot once
                 if isinstance(artist, plt.Line2D) or isinstance(artist, collections.PathCollection):
@@ -603,7 +653,7 @@ for i_episode in range(num_episodes):
             ax_sim.set_ylim(0, search_area_y)
             plt.pause(0.000001)
 
-            if savePlot and done: # Save plot object as tuple in external file using pickle
+            if savePlot and done: # Save .png image of simulation plot
 
                 sub_dir = "multi_source_results"
                 sim_sub_dir = "simulation_results"
@@ -620,54 +670,129 @@ for i_episode in range(num_episodes):
         if done:
             next_state = None
 
+            all_STE_x_mean, all_STE_y_mean, all_STE_strength_mean, all_STE_x_var, all_STE_y_var, all_STE_strength_var,= pf.estimate(particles, weights) # Fetch belief state for episode
+
             num_sources_int = particles[:,0].astype(int)
 
             bins = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5] # 6 bin edges for source no. prediction counts from 1 to 5
 
             source_counts, bins = np.histogram(num_sources_int, bins=bins)
 
-            largest_STE_mean = torch.tensor([
-                all_STE_x_mean[0],
-                all_STE_y_mean[0],
-                all_STE_strength_mean[0],
-                np.argmax(source_counts) + 1  # Convert to a scalar directly
-            ], dtype=torch.float32)
+
+            # ADD BELIEF STATE INTO MOVING AVERAGE
+            non_avg_belief_state_mean = []
+
+            # First value: the index of the max value of source_counts, +1 (since it's 1-indexed)
+            non_avg_belief_state_mean.append(np.argmax(source_counts) + 1)
+
+            # For each source, add x, y, and strength values in the order x, y, strength
+            for i in range(max_no_sources):
+                non_avg_belief_state_mean.append(all_STE_x_mean[i])
+                non_avg_belief_state_mean.append(all_STE_y_mean[i])
+                non_avg_belief_state_mean.append(all_STE_strength_mean[i])
+
+            # Convert to a tensor
+            non_avg_belief_state_mean = torch.tensor(non_avg_belief_state_mean, dtype=torch.float32)
 
             # Compute moving average with 'window_size' no. of values or all available values.
-            moving_average_queue.append(largest_STE_mean)
+            moving_average_queue_mean.append(non_avg_belief_state_mean)
 
-            largest_estimate_and_no = torch.mean(torch.stack(list(moving_average_queue)), dim=0)
+            belief_state_mean = torch.mean(torch.stack(list(moving_average_queue_mean)), dim=0)
+
+
+            # ADD VARIANCE OF BELIEF STATE INTO MOVING AVERAGE
+            non_avg_belief_state_var = []
+
+            # First value: variance of source_counts (variance in belief of source no.)
+            source_no_beliefs = np.arange(min_no_sources, max_no_sources + 1) # Initialise array with source belief no.
+            non_avg_belief_state_var.append(DescrStatsW(source_no_beliefs, weights=source_counts).std)
+
+            # For each source, add x, y, and strength values in the order x, y, strength
+            for i in range(max_no_sources):
+                non_avg_belief_state_var.append(all_STE_x_var[i])
+                non_avg_belief_state_var.append(all_STE_y_var[i])
+                non_avg_belief_state_var.append(all_STE_strength_var[i])
+
+            # Convert to a tensor
+            non_avg_belief_state_var = torch.tensor(non_avg_belief_state_var, dtype=torch.float32)
+
+            # Compute moving average with 'window_size' no. of values or all available values.
+            moving_average_queue_var.append(non_avg_belief_state_var)
+
+            belief_state_var = torch.mean(torch.stack(list(moving_average_queue_var)), dim=0)
 
 
             # Determine convergence with variance of particle estimates
 
-            # Define tolerance which checks the convergence of estimate against variance
-            tolerance_loc = 4.0
-            tolerance_str = 0.10 # To check the constistency of no. of sources estimation
+            # Convergence of estimates is defined by set tolerances on standard deviation
+            tolerance_loc = 6.0
+            tolerance_str = 6.0
+            tolerance_no = 0.60
 
-            source_estimate_decimal = largest_estimate_and_no[3] - int(largest_estimate_and_no[3])
+            
+            # CHECK CONVERGENCE STABILITY OF SOURCE 1
+            if (np.sqrt(belief_state_var[1].item()) < tolerance_loc and    # Ensure all tolerances are met 
+                np.sqrt(belief_state_var[2].item()) < tolerance_loc and 
+                np.sqrt(belief_state_var[3].item()) < tolerance_str and 
+                np.sqrt(belief_state_var[0].item()) < tolerance_no):
 
-            if np.sqrt(all_STE_x_var[0]) < tolerance_loc and np.sqrt(all_STE_y_var[0]) < tolerance_loc and source_estimate_decimal < tolerance_str:
-                estimate_convergence = True
+                if not convergence_stable[0]:
+                    convergence_tracking[0] += 1
+                    
+                    if convergence_tracking[0] >= 25: # Only recognise stability of convergence when converged 25 episodes in a row
+                        episode_converged[0] = i_episode
+                        convergence_stable[0] = True
+
             else:
-                estimate_convergence = False
+                convergence_tracking[0] = 0 # Reset convergence streak if broken
 
-            print(f"Goal chosen for episode: ({goal[0]:.2f}, {goal[1]:.2f})")
-            print(f"Estimated strongest source x: {largest_estimate_and_no[0]:.2f}, Estimated strongest source y: {largest_estimate_and_no[1]:.2f}, Estimated strongest source strength: {largest_estimate_and_no[2]:.2f}, Estimated number of sources: {largest_estimate_and_no[3]:.2f}")
-            print(f"Strongest source x standard deviation: {np.sqrt(all_STE_x_var[0]):.2f}, Strongest source y standard deviation: {np.sqrt(all_STE_y_var[0]):.2f}, Strongest source strength standard deviation: {np.sqrt(all_STE_strength_var[0]):.2f}")
-            print(f"Estimate convergence: {'True' if estimate_convergence else 'False'} \n")\
+            if convergence_stable[0]:
+                plot_x_1.append(i_episode) # Keep an array of all episodes since convergence for plotting
 
-            small_STE_x_mean = all_STE_x_mean[1:]
-            small_STE_y_mean = all_STE_y_mean[1:]
-            small_STE_strength_mean = all_STE_strength_mean[1:]
 
-            small_STE_x_var = all_STE_x_var[1:]
-            small_STE_y_var = all_STE_y_var[1:]
-            small_STE_strength_var = all_STE_strength_var[1:]
+            # CHECK CONVERGENCE STABILITY OF SOURCE 2
+            if (np.sqrt(belief_state_var[4].item()) < tolerance_loc and    # Ensure all tolerances are met 
+                np.sqrt(belief_state_var[5].item()) < tolerance_loc and 
+                np.sqrt(belief_state_var[6].item()) < tolerance_str):
 
-            for i, mean in enumerate(small_STE_x_mean):
-                print(f"Estimated source {i+2} x: {small_STE_x_mean[i]:.2f}, Estimated source {i+2} y: {small_STE_y_mean[i]:.2f}, Estimated source {i+2} strength: {small_STE_strength_mean[i]:.2f}")
-                print(f"Source {i+2} x standard deviation: {np.sqrt(small_STE_strength_var[i]):.2f}, Source {i+2} y standard deviation: {np.sqrt(small_STE_strength_var[i]):.2f}, Source {i+2} standard deviation: {np.sqrt(small_STE_strength_var[i]):.2f}")
+                if not convergence_stable[1]:
+                    convergence_tracking[1] += 1
+                    
+                    if convergence_tracking[1] >= 25: # Only recognise stability of convergence when converged 25 episodes in a row
+                        episode_converged[1] = i_episode
+                        convergence_stable[1] = True
+
+            else:
+                convergence_tracking[1] = 0 # Reset convergence streak if broken
+
+            if convergence_stable[1]:
+                plot_x_2.append(i_episode) # Keep an array of all episodes since convergence for plotting
+
+            
+            # CHECK CONVERGENCE STABILITY OF SOURCE 3
+            if (np.sqrt(belief_state_var[7].item()) < tolerance_loc and    # Ensure all tolerances are met 
+                np.sqrt(belief_state_var[8].item()) < tolerance_loc and 
+                np.sqrt(belief_state_var[9].item()) < tolerance_str):
+
+                if not convergence_stable[2]:
+                    convergence_tracking[2] += 1
+                    
+                    if convergence_tracking[2] >= 25: # Only recognise stability of convergence when converged 25 episodes in a row
+                        episode_converged[2] = i_episode
+                        convergence_stable[2] = True
+
+            else:
+                convergence_tracking[2] = 0 # Reset convergence streak if broken
+
+            if convergence_stable[2]:
+                plot_x_3.append(i_episode) # Keep an array of all episodes since convergence for plotting
+
+            print(f"Estimated number of sources: {belief_state_mean[0]:.2f} ± {np.sqrt(belief_state_var[0].item()):.2f}, Goal chosen for episode: ({goal[0]:.2f}, {goal[1]:.2f})")
+            print(f"Estimated strongest x: {belief_state_mean[1]:.2f} ± {np.sqrt(belief_state_var[1].item()):.2f}, Estimated strongest y: {belief_state_mean[2]:.2f} ± {np.sqrt(belief_state_var[2].item()):.2f}, Estimated strongest strength: {belief_state_mean[3]:.2f} ± {np.sqrt(belief_state_var[3].item()):.2f}") # Equivalent to range of 2 std devs for ~95% confidence
+            print(f"Convergence stability: {'True' if convergence_stable[0] else 'False'} (converged {int(convergence_tracking[0])} episodes in a row)\n")
+
+            for i in range(np.argmax(source_counts)):
+                print(f"Estimated source {i+2} x: {belief_state_mean[3*(i + 1) + 1]:.2f} ± {np.sqrt(belief_state_var[3*(i + 1) + 1].item()):.2f}, Estimated source {i+2} y: {belief_state_mean[3*(i + 1) + 2]:.2f} ± {np.sqrt(belief_state_var[3*(i + 1) + 2].item()):.2f}, Estimated source {i+2} strength: {belief_state_mean[3*(i + 1) + 3]:.2f} ± {np.sqrt(belief_state_var[3*(i + 1) + 3].item()):.2f}")
 
             print(f"\nSource no. belief distribution --> 1: {source_counts[0]} 2: {source_counts[1]} 3: {source_counts[2]} 4: {source_counts[3]} 5: {source_counts[4]}\n\n")
 
@@ -691,9 +816,9 @@ for i_episode in range(num_episodes):
             episode_end_distances.append(source1.distance(agent.x(), agent.y()))
             episode_lengths.append(agent.count())
 
-            largest_estimate_and_no = largest_estimate_and_no.unsqueeze(0) # To turn current_estimate into a 2D tensor
-            source_term_estimates = torch.cat((source_term_estimates, largest_estimate_and_no), dim=0)
-            largest_estimate_and_no = largest_estimate_and_no.flatten(0) # To turn current_estimate back into a 1D tensor
+            belief_state_mean = belief_state_mean.unsqueeze(0) # To turn current_estimate into a 2D tensor
+            belief_state_mean_over_time = torch.cat((belief_state_mean_over_time, belief_state_mean), dim=0)
+            belief_state_mean = belief_state_mean.flatten(0) # To turn current_estimate back into a 1D tensor
 
             if displayPlot:
                 fig_d, ax_d = plot_distance()
@@ -701,6 +826,7 @@ for i_episode in range(num_episodes):
                 fig_l_e, ax_l_e = plot_loc_estimate()
                 fig_s_e, ax_s_e = plot_strength_estimate()
                 fig_n_e, ax_n_e  = plot_number_estimate()
+                fig_l_er, ax_l_er = plot_loc_error()
             break
 
 
@@ -712,6 +838,7 @@ plot_length(show_result=True)
 plot_loc_estimate(show_result=True)
 plot_strength_estimate(show_result=True)
 plot_number_estimate(show_result=True)
+plot_loc_error(show_result=True)
 
 if savePlot: # Save plot object as tuple in external file using pickle
 
