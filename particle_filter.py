@@ -132,7 +132,7 @@ def update_weights(weights_old, likelihood):
     # Normalise weights to ensure weights sum to 1 to represent distribution
     return weights_new / np.sum(weights_new)
 
-# 5. Compute source term estimate(s) with current particles
+# 5. Compute source term (s) with current particles
 
 def estimate(particles, weights):
     

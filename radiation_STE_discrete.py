@@ -125,9 +125,9 @@ moving_average_queue_var = deque(maxlen=window_size)
 convergence_stable = np.array([False, False, False]) # To track whether STEs is stable and converged
 episode_converged = np.zeros(3, dtype=np.int64) # To track at which episode STEs is converged and stable
 convergence_tracking = np.zeros(3, dtype=np.int64) # Require a sustained period of convergence before actually recognising stability (tracking all sources)
-plot_x_1 = [] # To keep track of all episodes since STE 1 has converged
-plot_x_2 = [] # To keep track of all episodes since STE 1 has converged
-plot_x_3 = [] # To keep track of all episodes since STE 1 has converged
+plot_x_1 = [] # To keep track of all episodes since convergence
+plot_x_2 = [] # To keep track of all episodes since convergence
+plot_x_3 = [] # To keep track of all episodes since convergence
 
 # Named tuple allows access to its elements using named fields. Unlike dictionaries, more memory efficient and the named fields are immutable.
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward'))
@@ -167,7 +167,7 @@ BATCH_SIZE = 32
 GAMMA = 0.99
 EPS_START = 1.0
 EPS_END = 0.0
-EPS_DECAY = 80000 # Episilon decays per step done (80000 steps ~ 600 full length episodes)
+EPS_DECAY = 80000 # Episilon decays per step done (changed from 80k for non-goal)
 TAU = 0.005
 LR = 0.001 # Sparse rewards so lower LR might help stabilise training
 GOAL_PROB = 0.5 # Probability of goal-directed exploration instead of random exploration
@@ -319,10 +319,11 @@ def plot_length(show_result=False, window_size=100):
         ax_l.set_title('Training...')
 
     yticks = [50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150]
+    # yticks = [50, 70, 90, 110, 130, 150, 170, 190, 210, 230, 250, 270, 290] # For 300 step length for no-goal based
 
     ax_l.set_xlabel('Episode')
     ax_l.set_ylabel('Length of episode (steps taken)')
-    ax_l.set_ylim(min(yticks) - 5, max(yticks) + 5) # Ensure y-axis is fixed
+    ax_l.set_ylim(min(yticks) - 5, max(yticks) + 15) # Ensure y-axis is fixed
     ax_l.set_yticks(yticks)
     ax_l.plot(lengths_t.numpy(), label="Raw data")
 
@@ -376,11 +377,11 @@ def plot_loc_estimate(show_result=False):
     # Return the figure and axis objects for external access
     return fig_l_e, ax_l_e
 
-def plot_strength_estimate(show_result=False):
+def plot_strength_estimate_error(show_result=False):
     # Split data into separate tensors
-    source_strength_1 = belief_state_mean_over_time[:, 3]
-    source_strength_2 = belief_state_mean_over_time[:, 6]
-    source_strength_3 = belief_state_mean_over_time[:, 9]
+    source_strength_1_error = belief_state_mean_over_time[:, 3] - source1.source_radioactivity
+    source_strength_2_error = belief_state_mean_over_time[:, 6] - source2.source_radioactivity
+    source_strength_3_error = belief_state_mean_over_time[:, 9] - source3.source_radioactivity
 
     ax_s_e.cla()  # Clear the current axis
 
@@ -389,16 +390,12 @@ def plot_strength_estimate(show_result=False):
     else:
         ax_s_e.set_title('Training...')
 
-    yticks = [0, 50, 100, 150, 200, 250, 300]
-
     # Plot source strength estimate first
     ax_s_e.set_xlabel('Episode')
-    ax_s_e.set_ylabel('Rate of biological dose (mSv/h)')
-    ax_s_e.set_ylim(min(yticks), max(yticks) + 25) # Ensure y-axis is fixed
-    ax_s_e.set_yticks(yticks)
-    ax_s_e.plot(source_strength_1.numpy(), label="Source 1", color="black")
-    ax_s_e.plot(source_strength_2.numpy(), label="Source 2", color="darkgray")
-    ax_s_e.plot(source_strength_3.numpy(), label="Source 3", color="lightgray")
+    ax_s_e.set_ylabel('Equivalent dose rate (mSv/h)')
+    ax_s_e.plot(source_strength_1_error.numpy(), label="Source 1", color="black")
+    ax_s_e.plot(source_strength_2_error.numpy(), label="Source 2", color="darkgray")
+    ax_s_e.plot(source_strength_3_error.numpy(), label="Source 3", color="lightgray")
 
     ax_s_e.legend()
 
@@ -463,13 +460,13 @@ def plot_loc_error(show_result=False): # Not automatically generalised to any ot
         ax_l_er.set_title('Training...')
 
     ax_l_er.set_xlabel('Episode')
-    ax_l_er.set_ylabel('Distance between estimate and true source (m)')
+    ax_l_er.set_ylabel('Distance (m)')
 
     # Plot lines (only when each source estimate has converged)
     ax_l_er.plot(plot_x_1, dist1[episode_converged[0]:].numpy(), label="Source 1", color="cyan") # Explicitly cast to int for slicing
 
     if convergence_stable[1]:
-        ax_l_er.plot(plot_x_2, dist2[episode_converged[1]:].numpy(), label="Source 2", color="magenta")
+       ax_l_er.plot(plot_x_2, dist2[episode_converged[1]:].numpy(), label="Source 2", color="magenta")
 
     if convergence_stable[2]:
         ax_l_er.plot(plot_x_3, dist3[episode_converged[2]:].numpy(), label="Source 3", color="yellow")
@@ -573,7 +570,7 @@ for i_episode in range(num_episodes):
             truncated = False
             reward = 0.175*total_radiation_level # Big reward for reaching source estimate (depends on actual radiation level recorded so false positives are not rewarded)
             print(f"Reward: {reward:.3f} (reached within 2 m of source estimate in {agent.count()} steps)")
-        elif agent.count() >= 150: # changed from 100
+        elif agent.count() >= 150: # changed from 300 for goal-based
             terminated = False
             truncated = True
             # Initially estimate might be inaccurate but is still far away from starting location, so it motivates agent to leave starting location
@@ -582,7 +579,7 @@ for i_episode in range(num_episodes):
         elif agent.actionPossible() == False: # Discourage agent from attempting to exit search area
             terminated = False
             truncated = False
-            reward = -0.0025*belief_state_mean[3] # Was -0.025 (reduced to prevent agent from only aiming to avoid the edge)
+            reward = -0.0025*belief_state_mean[3] # Was -0.025 (reduced to prevent agent from only aiming to avoid the edge), and not to terminate episode so that somehow crashing into the edge is a better idea than not crashing and moving towards goal
         else:
             terminated = False
             truncated = False
@@ -592,17 +589,18 @@ for i_episode in range(num_episodes):
         done = terminated or truncated # Check if episode is complete
 
         if ((i_episode + 1) % displaySimulation_p == 0 or (i_episode + 1) == 1) and displaySimulation: # Only show simulation of episodes which are multiples of 100, and the first episode
-             
+
             for artist in ax_sim.get_children(): # Only clear data points so that radiation map only needs to be plot once
                 if isinstance(artist, plt.Line2D) or isinstance(artist, collections.PathCollection):
                     artist.remove()
 
             # Plot the radiation map once
             if not map_plotted:
-                contour = ax_sim.contourf(rad_X, rad_Y, Z_clipped, levels=np.logspace(np.log10(0.1), np.log10(1000), num=400), cmap='viridis', norm=LogNorm(vmin=0.1, vmax=1000), zorder=0)
+                contour = ax_sim.contourf(rad_X, rad_Y, Z_clipped, levels=np.logspace(np.log10(0.01), np.log10(1000), num=400), cmap='viridis', norm=LogNorm(vmin=0.01, vmax=1000), zorder=0)
                 
                 cbar = fig_sim.colorbar(contour, ax=ax_sim) # Add colorbar with log scale
-                cbar.set_ticks([0.1, 1, 10, 100, 1000])  # Log ticks
+                cbar.set_label('Equivalent dose rate (mSv/h)')
+                cbar.set_ticks([0.01, 0.1, 1, 10, 100, 1000])  # Log ticks
 
                 map_plotted = True # only plot for first time
 
@@ -621,10 +619,10 @@ for i_episode in range(num_episodes):
 
             # Show the path of the agent
             for pos in agent_path:
-                path = ax_sim.plot(pos[0], pos[1], marker='o', color=(0.0, 0.7, 0.0), markersize=2, zorder=2)
+                path = ax_sim.plot(pos[0], pos[1], marker='o', color='darkgreen', markersize=2, zorder=2)
 
             # Show the agent's current position as a distinct marker
-            pos = ax_sim.plot(agent.x(), agent.y(), marker='x', color=(0.0, 0.7, 0.0), markersize=6, zorder=2)
+            pos = ax_sim.plot(agent.x(), agent.y(), marker='x', color='darkgreen', markersize=6, zorder=2)
 
             colors = ['cyan', 'orange', 'lime', 'yellow', 'pink'] # To distinguish between source prediction number in plotting
 
@@ -632,7 +630,7 @@ for i_episode in range(num_episodes):
 
             src_handles = []
             src_labels = []
-
+            
             for i in range(max_no_sources):
                 # Select columns corresponding to specific source prediction
                 source_prediction = particles[:, [3*i + 1, 3*i + 2]]
@@ -644,11 +642,11 @@ for i_episode in range(num_episodes):
                     src = ax_sim.scatter(filtered_data[:, 0], filtered_data[:, 1], marker='.', s=2, color=colors[i], label=f'{i+1}', zorder=2)
                     src_handles.append(src)
                     src_labels.append(f'{i+1}')
-
+            
             # Pause briefly to update the plot
 
             ax_sim.legend(handles = src_handles, labels = src_labels, title="Estimated sources", loc='lower left', bbox_to_anchor=(0, 0), markerscale=4, fontsize=8, title_fontsize=8) # Show estimated legend
-
+            
             ax_sim.set_xlim(0, search_area_x)
             ax_sim.set_ylim(0, search_area_y)
             plt.pause(0.000001)
@@ -749,7 +747,7 @@ for i_episode in range(num_episodes):
             if convergence_stable[0]:
                 plot_x_1.append(i_episode) # Keep an array of all episodes since convergence for plotting
 
-
+            
             # CHECK CONVERGENCE STABILITY OF SOURCE 2
             if (np.sqrt(belief_state_var[4].item()) < tolerance_loc and    # Ensure all tolerances are met 
                 np.sqrt(belief_state_var[5].item()) < tolerance_loc and 
@@ -824,7 +822,7 @@ for i_episode in range(num_episodes):
                 fig_d, ax_d = plot_distance()
                 fig_l, ax_l = plot_length()
                 fig_l_e, ax_l_e = plot_loc_estimate()
-                fig_s_e, ax_s_e = plot_strength_estimate()
+                fig_s_e, ax_s_e = plot_strength_estimate_error()
                 fig_n_e, ax_n_e  = plot_number_estimate()
                 fig_l_er, ax_l_er = plot_loc_error()
             break
@@ -836,11 +834,11 @@ print('Complete')
 plot_distance(show_result=True)
 plot_length(show_result=True)
 plot_loc_estimate(show_result=True)
-plot_strength_estimate(show_result=True)
+plot_strength_estimate_error(show_result=True)
 plot_number_estimate(show_result=True)
 plot_loc_error(show_result=True)
 
-if savePlot: # Save plot object as tuple in external file using pickle
+if savePlot: # Save plot object as tuple in external file using pickle, as well as pngs of plotted graphs
 
     current_dir = os.getcwd()
     sub_dir = "multi_source_results"
@@ -848,6 +846,8 @@ if savePlot: # Save plot object as tuple in external file using pickle
     # Ensure the subdirectory exists
     os.makedirs(sub_dir, exist_ok=True)
 
+
+    # Pickle objects for plotting
     with open(os.path.join(sub_dir, "distance_plot.pkl"), "wb") as file:
         pickle.dump((fig_d, ax_d), file)
 
@@ -857,14 +857,28 @@ if savePlot: # Save plot object as tuple in external file using pickle
     with open(os.path.join(sub_dir,"location_plot.pkl"), "wb") as file:
         pickle.dump((fig_l_e, ax_l_e), file)
 
-    with open(os.path.join(sub_dir,"strength_plot.pkl"), "wb") as file:
+    with open(os.path.join(sub_dir,"strength_error_plot.pkl"), "wb") as file:
         pickle.dump((fig_s_e, ax_s_e), file)
 
     with open(os.path.join(sub_dir,"number_plot.pkl"), "wb") as file:
         pickle.dump((fig_n_e, ax_n_e), file)
 
+    with open(os.path.join(sub_dir,"error_plot.pkl"), "wb") as file:
+        pickle.dump((fig_l_er, ax_l_er), file)
+
+    # .pngs of finished plots
+    try:
+        fig_d.savefig(os.path.join(sub_dir,"dist"), bbox_inches='tight')
+        fig_l.savefig(os.path.join(sub_dir,"length"), bbox_inches='tight')
+        fig_l_e.savefig(os.path.join(sub_dir,"coords"), bbox_inches='tight')
+        fig_s_e.savefig(os.path.join(sub_dir,"est_strengths"), bbox_inches='tight')
+        fig_n_e.savefig(os.path.join(sub_dir,"num_sources"), bbox_inches='tight')
+        fig_l_er.savefig(os.path.join(sub_dir,"estimation_error"), bbox_inches='tight')
+    except:
+        print("Couldn't save .png figures!")
+
     folder_path = os.path.join(current_dir, sub_dir)
-    print(f"File saved at: {folder_path}")
+    print(f"Files saved at: {folder_path}")
 
 plt.ioff()
 plt.show()
