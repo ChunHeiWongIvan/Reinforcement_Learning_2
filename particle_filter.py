@@ -212,7 +212,7 @@ def resampling_simple(particles, weights, min_no_sources, max_no_sources, min_ra
 
     no_sources_change_pct = 0.004*eps_threshold # 0.4% probability for number of sources belief to increase, and to decrease (chance decays over time)
 
-    scramble_pct = 0.004*eps_threshold # 0.1% probability for sources location/ strength to be scrambled
+    scramble_pct = 0.004*eps_threshold # 0.4% probability for sources location/ strength to be scrambled
 
     if need_resample:
         particles_new = particles # Initalise separate instance of particles array 

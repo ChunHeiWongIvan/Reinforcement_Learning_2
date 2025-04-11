@@ -378,10 +378,11 @@ def plot_loc_estimate(show_result=False):
     return fig_l_e, ax_l_e
 
 def plot_strength_estimate_error(show_result=False):
+    
     # Split data into separate tensors
-    source_strength_1_error = belief_state_mean_over_time[:, 3] - source1.source_radioactivity
-    source_strength_2_error = belief_state_mean_over_time[:, 6] - source2.source_radioactivity
-    source_strength_3_error = belief_state_mean_over_time[:, 9] - source3.source_radioactivity
+    source_strength_1_error = abs(belief_state_mean_over_time[:, 3] - source1.source_radioactivity)
+    source_strength_2_error = abs(belief_state_mean_over_time[:, 6] - source2.source_radioactivity)
+    source_strength_3_error = abs(belief_state_mean_over_time[:, 9] - source3.source_radioactivity)
 
     ax_s_e.cla()  # Clear the current axis
 
